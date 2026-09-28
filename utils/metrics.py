@@ -143,7 +143,17 @@ def calculate_roc_auc(
 
 
 def _binary_roc_auc(y_prob: np.ndarray, y_true: np.ndarray) -> float:
-    """Helper function to calculate binary ROC-AUC via rank summation."""
+    """
+    Helper function to calculate binary ROC-AUC via rank summation.
+
+    Args:
+        y_prob (torch.Tensor): Predicted probabilities or logits (shape: [N, C] or [N]).
+        y_true (torch.Tensor): Ground truth target class labels (shape: [N]).
+        num_classes (int): Total number of unique classes.
+
+    Returns:
+        float: Binary ROC-AUC score.
+    """
     desc_indices = np.argsort(-y_prob)
     y_true_sorted = y_true[desc_indices]
 
@@ -225,22 +235,58 @@ def calculate_cohen_kappa(
 # =============================================================================
 
 def calculate_mse(y_pred: torch.Tensor, y_true: torch.Tensor) -> float:
-    """Computes Mean Squared Error (MSE)."""
+    """
+    Computes Mean Squared Error (MSE).
+
+    Args:
+        y_pred (torch.Tensor): Predicted continuous values (shape: [N]).
+        y_true (torch.Tensor): Ground truth continuous values (shape: [N]).
+
+    Returns:
+        float: Mean Squared Error value.
+    """
     return float(torch.mean((y_pred - y_true) ** 2).item())
 
 
 def calculate_mae(y_pred: torch.Tensor, y_true: torch.Tensor) -> float:
-    """Computes Mean Absolute Error (MAE)."""
+    """
+    Computes Mean Absolute Error (MAE).
+
+    Args:
+        y_pred (torch.Tensor): Predicted continuous values (shape: [N]).
+        y_true (torch.Tensor): Ground truth continuous values (shape: [N]).
+
+    Returns:
+        float: Mean Absolute Error value.
+    """
     return float(torch.mean(torch.abs(y_pred - y_true)).item())
 
 
 def calculate_rmse(y_pred: torch.Tensor, y_true: torch.Tensor) -> float:
-    """Computes Root Mean Squared Error (RMSE)."""
+    """
+    Computes Root Mean Squared Error (RMSE).
+
+    Args:
+        y_pred (torch.Tensor): Predicted continuous values (shape: [N]).
+        y_true (torch.Tensor): Ground truth continuous values (shape: [N]).
+
+    Returns:
+        float: Root Mean Squared Error value.
+    """
     return float(torch.sqrt(torch.mean((y_pred - y_true) ** 2)).item())
 
 
 def calculate_r2_score(y_pred: torch.Tensor, y_true: torch.Tensor) -> float:
-    """Computes Coefficient of Determination (R² Score)."""
+    """
+    Computes Coefficient of Determination (R² Score).
+
+    Args:
+        y_pred (torch.Tensor): Predicted continuous values (shape: [N]).
+        y_true (torch.Tensor): Ground truth continuous values (shape: [N]).
+
+    Returns:
+        float: R² score value in range (-∞, 1.0].
+    """
     ss_res = torch.sum((y_true - y_pred) ** 2).item()
     ss_tot = torch.sum((y_true - torch.mean(y_true)) ** 2).item()
     return float(1.0 - (ss_res / ss_tot)) if ss_tot > 0 else 0.0
@@ -266,6 +312,7 @@ class MetricTracker:
         self._predictions: list[torch.Tensor] = []
         self._targets: list[torch.Tensor] = []
 
+
     def update_scalar(self, name: str, value: float, n: int = 1) -> None:
         """
         Updates a running scalar metric (e.g., loss).
@@ -277,6 +324,7 @@ class MetricTracker:
         """
         self.scalar_sums[name] = self.scalar_sums.get(name, 0.0) + (value * n)
         self.scalar_counts[name] = self.scalar_counts.get(name, 0) + n
+
 
     def update_predictions(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> None:
         """
@@ -291,19 +339,35 @@ class MetricTracker:
         self._predictions.append(y_pred.detach().cpu())
         self._targets.append(y_true.detach().cpu())
 
+
     def get_scalar_average(self, name: str) -> float:
-        """Returns the running average for a specified scalar metric."""
+        """
+        Returns the running average for a specified scalar metric.
+
+        Args:
+            name (str): Identifier name for the metric.
+
+        Returns:
+            float: Current average value of the metric, or 0.0 if not updated yet.
+        """
         count = self.scalar_counts.get(name, 0)
         return self.scalar_sums.get(name, 0.0) / count if count > 0 else 0.0
 
+
     def get_accumulated_tensors(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Concatenates and returns all accumulated batch predictions and targets."""
+        """
+        Concatenates and returns all accumulated batch predictions and targets.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: Concatenated predictions and targets tensors.
+        """
         if not self._predictions or not self._targets:
             raise RuntimeError("No predictions or targets have been accumulated.")
 
         all_preds = torch.cat(self._predictions, dim=0)
         all_targets = torch.cat(self._targets, dim=0)
         return all_preds, all_targets
+
 
     def compute_classification_summary(
         self,
@@ -337,6 +401,7 @@ class MetricTracker:
             "cohen_kappa": kappa,
         }
         return summary
+
 
     def reset(self) -> None:
         """Clears all accumulated scalars and tensor histories."""
