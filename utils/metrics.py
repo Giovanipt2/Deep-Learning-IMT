@@ -412,6 +412,29 @@ class MetricTracker:
         return summary
 
 
+    def compute_regression_summary(self) -> dict[str, float]:
+        """
+        Calculates all accumulated regression metrics for the epoch.
+
+        Returns:
+            dict[str, float]: Dictionary containing computed scores for MSE, MAE, RMSE, and R2 Score.
+        """
+        preds, targets = self.get_accumulated_tensors()
+
+        mse = calculate_mse(preds, targets)
+        mae = calculate_mae(preds, targets)
+        rmse = calculate_rmse(preds, targets)
+        r2 = calculate_r2_score(preds, targets)
+
+        summary = {
+            "mse": mse,
+            "mae": mae,
+            "rmse": rmse,
+            "r2_score": r2,
+        }
+        return summary
+
+
     def reset(self) -> None:
         """Clears all accumulated scalars and tensor histories."""
         self.scalar_sums.clear()
