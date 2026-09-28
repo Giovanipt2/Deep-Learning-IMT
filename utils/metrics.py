@@ -51,6 +51,9 @@ def calculate_precision_recall_f1(
         y_true (torch.Tensor): Target class labels (shape: [N]).
         num_classes (int): Total number of unique classes.
         average (str): Aggregation mode ('macro', 'micro', or 'weighted'). Defaults to 'macro'.
+            - 'macro': Unweighted mean across classes. Treats all classes equally regardless of support.
+            - 'micro': Global aggregation. Calculates metrics from total true positives/false counts.
+            - 'weighted': Support-weighted mean. Scales each class score by its proportion of real targets.
 
     Returns:
         dict[str, float]: Dictionary containing 'precision', 'recall', and 'f1_score'.
@@ -185,6 +188,12 @@ def calculate_cohen_kappa(
         num_classes (int): Total number of unique classes.
         weights (str | None): Weighting type: None (unweighted), 'linear', or 'quadratic' (QWK).
             Defaults to None.
+            - None: Unweighted. Penalizes all misclassifications equally. Best for nominal
+                    classes without inherent order (e.g., MNIST digits, CIFAR-10 objects).
+            - 'linear': Linearly weighted. Penalty grows proportionally with distance (|i - j|).
+                    Best for ordinal classes with linear distance steps (e.g., star ratings 1-5).
+            - 'quadratic': Quadratically weighted (QWK). Penalty grows with squared distance ((i - j)²).
+                    Heavily penalizes extreme errors; best for ordinal/graded domains (e.g., medical severity stages, essay grading).
 
     Returns:
         float: Cohen's Kappa score in range [-1.0, 1.0].
