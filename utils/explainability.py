@@ -3,7 +3,8 @@ Model Explainability and Interpretability Utilities.
 
 Provides components for extracting CNN feature maps, computing Grad-CAM
 (Gradient-weighted Class Activation Maps) for convolutional architectures, and
-computing Integrated Gradients feature attributions for arbitrary PyTorch models.
+computing Integrated Gradients feature attributions for arbitrary PyTorch models
+across both classification and regression tasks (local and global importance).
 """
 
 import logging
@@ -25,7 +26,7 @@ def _to_tensor(x: Union[torch.Tensor, np.ndarray], device: torch.device) -> torc
         device (torch.device): Target device for tensor.
 
     Returns:
-        torch.Tensor: Input converted to tensor on the specified device.
+        torch.Tensor: Tensor on the specified device with dtype=torch.float32.
     """
     if isinstance(x, np.ndarray):
         x = torch.from_numpy(x)
@@ -212,30 +213,38 @@ class GradCAM:
 def compute_feature_attributions(
     model: nn.Module,
     input_tensor: Union[torch.Tensor, np.ndarray],
+    task_type: str = "classification",
     target_class: Optional[int] = None,
     baseline: Optional[Union[torch.Tensor, np.ndarray]] = None,
     steps: int = 50,
 ) -> np.ndarray:
     """
-    Computes Integrated Gradients feature attributions for a given input sample.
+    Computes Integrated Gradients feature attributions for single samples or batches.
 
     Args:
         model (nn.Module): PyTorch model.
-        input_tensor (Union[torch.Tensor, np.ndarray]): Single input sample (1D or 2D tensor).
-        target_class (Optional[int]): Target class index for classification. If None, uses max output.
-        baseline (Optional[Union[torch.Tensor, np.ndarray]]): Baseline reference sample.
+        input_tensor (Union[torch.Tensor, np.ndarray]): Input tensor of shape (D,) or (N, D).
+        task_type (str): Task type, either 'classification' or 'regression'. Defaults to 'classification'.
+        target_class (Optional[int]): Target class index for classification. If None, uses model's top prediction.
+            Ignored if task_type='regression'.
+        baseline (Optional[Union[torch.Tensor, np.ndarray]]): Reference baseline tensor.
             Defaults to zeros vector matching input_tensor shape.
         steps (int): Number of Riemann interpolation steps. Defaults to 50.
 
     Returns:
         np.ndarray: Feature attribution scores array matching input_tensor shape.
+            Positive values indicate positive contribution to output; negative values indicate opposing impact.
     """
+    if task_type not in ("classification", "regression"):
+        raise ValueError("task_type must be either 'classification' or 'regression'.")
+
     model.eval()
     device = next(model.parameters()).device
 
     x = _to_tensor(input_tensor, device)
-    if x.ndim == 1:
-        x = x.unsqueeze(0)
+    is_single_sample = x.ndim == 1
+    if is_single_sample:
+        x = x.unsqueeze(0)  # Shape becomes (1, D)
 
     if baseline is None:
         x0 = torch.zeros_like(x)
@@ -244,28 +253,81 @@ def compute_feature_attributions(
         if x0.ndim == 1:
             x0 = x0.unsqueeze(0)
 
-    # Generate interpolated paths between baseline (x0) and input (x)
+    # Interpolate paths from baseline to inputs across steps
+    # shape: (steps + 1, batch_size, D)
     alphas = torch.linspace(0.0, 1.0, steps + 1, device=device)
-    interpolated_inputs = torch.cat([x0 + alpha * (x - x0) for alpha in alphas], dim=0)
-    interpolated_inputs.requires_grad = True
 
-    model.zero_grad()
-    outputs = model(interpolated_inputs)
+    # Batch computation of path steps
+    attributions_list = []
 
-    if outputs.ndim > 1:
-        if target_class is None:
-            target_class = int(torch.argmax(outputs[0]).item())
-        scores = outputs[:, target_class]
-    else:
-        scores = outputs
+    # Process sample by sample to avoid GPU memory overflow during step interpolation
+    for i in range(x.shape[0]):
+        sample_x = x[i : i + 1]  # (1, D)
+        sample_x0 = x0[i : i + 1] if x0.shape[0] > 1 else x0  # (1, D)
 
-    # Compute gradients along interpolated path
-    grads = torch.autograd.grad(outputs=scores.sum(), inputs=interpolated_inputs)[0]
+        interpolated_inputs = torch.cat([sample_x0 + alpha * (sample_x - sample_x0) for alpha in alphas], dim=0)
+        interpolated_inputs.requires_grad = True
 
-    # Riemann sum approximation of gradients integral
-    avg_grads = torch.mean(grads[:-1], dim=0, keepdim=True)
+        model.zero_grad()
+        outputs = model(interpolated_inputs)
 
-    # Integrated Gradients = (x - x0) * average_gradients
-    attributions = (x - x0) * avg_grads
+        if task_type == "classification":
+            if outputs.ndim > 1 and outputs.shape[1] > 1:
+                if target_class is None:
+                    # Use top predicted class of the un-interpolated target sample
+                    target_c = int(torch.argmax(outputs[-1]).item())
+                else:
+                    target_c = target_class
+                scores = outputs[:, target_c]
+            else:
+                scores = outputs.squeeze()
+        else:  # regression
+            scores = outputs.squeeze()
 
-    return attributions.squeeze(0).detach().cpu().numpy()
+        # Compute gradients along interpolation path
+        grads = torch.autograd.grad(outputs=scores.sum(), inputs=interpolated_inputs)[0]
+
+        # Average gradients across steps and multiply by delta (x - x0)
+        avg_grads = torch.mean(grads[:-1], dim=0, keepdim=True)
+        attr = (sample_x - sample_x0) * avg_grads
+        attributions_list.append(attr.detach().cpu().numpy())
+
+    attributions = np.vstack(attributions_list)
+
+    if is_single_sample:
+        return attributions.squeeze(0)
+    return attributions
+
+
+def compute_global_feature_importance(
+    model: nn.Module,
+    dataset_loader_or_tensor: Union[torch.Tensor, np.ndarray],
+    task_type: str = "classification",
+    target_class: Optional[int] = None,
+    steps: int = 50,
+) -> np.ndarray:
+    """
+    Computes global feature importance across multiple dataset samples by averaging
+    mean absolute Integrated Gradients attributions.
+
+    Args:
+        model (nn.Module): PyTorch model.
+        dataset_loader_or_tensor (Union[torch.Tensor, np.ndarray]): Data batch or matrix of shape (N, D).
+        task_type (str): Task mode ('classification' or 'regression').
+        target_class (Optional[int]): Optional class target for classification analysis.
+        steps (int): Interpolation steps. Defaults to 50.
+
+    Returns:
+        np.ndarray: 1D array of shape (D,) containing global importance scores for each feature.
+    """
+    local_attributions = compute_feature_attributions(
+        model=model,
+        input_tensor=dataset_loader_or_tensor,
+        task_type=task_type,
+        target_class=target_class,
+        steps=steps,
+    )
+
+    # Mean absolute value across all dataset samples (axis 0)
+    global_importance = np.mean(np.abs(local_attributions), axis=0)
+    return global_importance
