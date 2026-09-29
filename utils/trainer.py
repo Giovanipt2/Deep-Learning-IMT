@@ -1,12 +1,10 @@
 """
-Model training and evaluation loop manager.
-
-Provides a unified Trainer class responsible for running training and validation epochs,
-managing hardware acceleration (AMP), gradient accumulation, gradient clipping, learning rate
-scheduling, checkpointing, early stopping, and metric tracking across classification and regression tasks.
+Model training, evaluation, and persistence loop manager.
 """
 
+import json
 import logging
+from pathlib import Path
 from typing import Any, Optional
 import torch
 import torch.nn as nn
@@ -24,10 +22,7 @@ logger = logging.getLogger(__name__)
 
 class Trainer:
     """
-    Flexible engine for training and evaluating PyTorch models in classification or regression tasks.
-
-    Handles mixed precision training, gradient clipping/accumulation, learning rate
-    scheduling, metric history collection, checkpoint saving, and early stopping.
+    Engine for training, evaluating, and persisting PyTorch models.
     """
 
     def __init__(
@@ -42,30 +37,41 @@ class Trainer:
         task_type: str = "classification",
         num_classes: Optional[int] = None,
         primary_metric: Optional[str] = None,
+        higher_is_better: bool = True,
         gradient_accumulation_steps: int = 1,
         max_grad_norm: Optional[float] = None,
         use_amp: bool = False,
         kappa_weights: Optional[str] = None,
+        model_name: str = "CustomModel",
+        model_params: int = 0,
+        model_gflops: float = 0.0,
     ) -> None:
         """
-        Initializes the Trainer instance.
+        Initializes the Trainer with model, optimizer, criterion, and optional components like scheduler,
+        checkpoint manager, and early stopping.
 
         Args:
-            model (nn.Module): PyTorch neural network model.
-            optimizer (optim.Optimizer): Optimization algorithm instance.
-            criterion (nn.Module): Loss function.
-            scheduler (Optional[Any]): Learning rate scheduler instance. Defaults to None.
-            checkpoint_manager (Optional[CheckpointManager]): Manager for saving model state. Defaults to None.
-            early_stopping (Optional[EarlyStopping]): Early stopping callback. Defaults to None.
-            device (Optional[torch.device]): Compute device (CPU/CUDA/MPS). Auto-detected if None.
-            task_type (str): Task mode ('classification' or 'regression'). Defaults to 'classification'.
-            num_classes (Optional[int]): Total target classes. Required if task_type='classification'.
-            primary_metric (Optional[str]): Main metric key to display in logs (e.g., 'f1_score', 'mae').
-                Defaults to 'accuracy' for classification, 'rmse' for regression.
-            gradient_accumulation_steps (int): Number of steps to accumulate gradients before optimizer step. Defaults to 1.
-            max_grad_norm (Optional[float]): Maximum norm for gradient clipping. Defaults to None.
-            use_amp (bool): Whether to enable Automatic Mixed Precision (AMP). Defaults to False.
-            kappa_weights (Optional[str]): Weighting scheme for Cohen's Kappa metric. Defaults to None.
+            model (nn.Module): The PyTorch model to train.
+            optimizer (optim.Optimizer): The optimizer for training.
+            criterion (nn.Module): The loss function.
+            scheduler (Optional[Any]): Learning rate scheduler.
+            checkpoint_manager (Optional[CheckpointManager]): Manages saving/loading checkpoints.
+            early_stopping (Optional[EarlyStopping]): Early stopping mechanism.
+            device (Optional[torch.device]): Device to run the model on. Defaults to GPU if available.
+            task_type (str): Type of task: "classification" or "regression".
+            num_classes (Optional[int]): Number of classes for classification tasks.
+            primary_metric (Optional[str]): Metric to monitor for best model selection.
+            higher_is_better (bool): Whether a higher value of the primary metric is better.
+            gradient_accumulation_steps (int): Steps to accumulate gradients before updating weights.
+            max_grad_norm (Optional[float]): Max norm for gradient clipping. None disables clipping.
+            use_amp (bool): Whether to use Automatic Mixed Precision for training.
+            kappa_weights (Optional[str]): Weights for Cohen's Kappa calculation in classification tasks.
+            model_name (str): Name of the model for metadata tracking.
+            model_params (int): Number of parameters in the model for metadata tracking.
+            model_gflops (float): GFLOPs of the model for metadata tracking.
+
+        Raises:
+            ValueError: If task_type is not "classification" or "regression".
         """
         if task_type not in ("classification", "regression"):
             raise ValueError("task_type must be either 'classification' or 'regression'.")
@@ -76,6 +82,14 @@ class Trainer:
         self.task_type = task_type
         self.num_classes = num_classes
         self.primary_metric = primary_metric or ("accuracy" if task_type == "classification" else "rmse")
+
+        # Determine metric direction (higher is better for accuracy/f1, lower for loss/rmse/mae)
+        if primary_metric in ("loss", "rmse", "mse", "mae"):
+            self.higher_is_better = False
+        else:
+            self.higher_is_better = higher_is_better
+
+        self.best_metric_value = -float("inf") if self.higher_is_better else float("inf")
 
         self.device = device if device is not None else get_device()
         self.model = model.to(self.device)
@@ -89,27 +103,68 @@ class Trainer:
         self.use_amp = use_amp
         self.kappa_weights = kappa_weights
 
-        # Set up AMP Scaler (enabled if CUDA and requested)
+        # Metadata tracking for plot_model_comparison
+        self.model_name = model_name
+        self.model_params = model_params
+        self.model_gflops = model_gflops
+
+        # Scaler for AMP
         is_cuda = self.device.type == "cuda"
         self.scaler = torch.amp.GradScaler("cuda", enabled=(use_amp and is_cuda))
 
-        # Trackers for train and validation
+        # Trackers
         self.train_tracker = MetricTracker()
         self.val_tracker = MetricTracker()
-
-        # Training history repository
         self.history: dict[str, list[float]] = {}
+
+        # Automatically write metadata.json if checkpoint_manager exists
+        if self.checkpoint_manager is not None:
+            self._save_metadata_json()
+
+    def _save_metadata_json(self) -> None:
+        """Saves static model metadata (name, params, gflops) to directory."""
+        meta_path = self.checkpoint_manager.checkpoint_dir / "metadata.json"
+        data = {
+            "name": self.model_name,
+            "params": self.model_params,
+            "gflops": self.model_gflops,
+        }
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+
+
+    def _save_history_json(self) -> None:
+        """Saves complete epoch training history to JSON."""
+        if self.checkpoint_manager is not None:
+            hist_path = self.checkpoint_manager.checkpoint_dir / "history.json"
+            with open(hist_path, "w", encoding="utf-8") as f:
+                json.dump(self.history, f, indent=4)
+
+
+    def _is_better(self, current: float) -> bool:
+        """
+        Checks if current metric value improves upon best recorded metric.
+
+        Args:
+            current (float): Current epoch's metric value.
+
+        Returns:
+            bool: True if current is better than best_metric_value, False otherwise.
+        """
+        if self.higher_is_better:
+            return current > self.best_metric_value
+        return current < self.best_metric_value
 
 
     def _prepare_batch(self, batch: Any) -> tuple[Any, torch.Tensor]:
         """
-        Extracts inputs and targets from a batch and transfers them to target device.
+        Prepares a batch of data for model input, ensuring tensors are moved to the correct device.
 
         Args:
-            batch (Any): A single batch from DataLoader, can be tuple, list, or dict.
+            batch (Any): A batch of data, which can be a tuple, list, or dict containing inputs and targets.
 
         Returns:
-            tuple[Any, torch.Tensor]: Tuple of (inputs, targets) on the correct device.
+            tuple[Any, torch.Tensor]: A tuple containing the inputs and targets, both moved to the correct device.
         """
         if isinstance(batch, (tuple, list)):
             x, y = batch[0], batch[1]
@@ -130,13 +185,13 @@ class Trainer:
 
     def _compute_epoch_summary(self, tracker: MetricTracker) -> dict[str, float]:
         """
-        Computes metrics summary dynamically based on task type.
+        Computes a summary of metrics for the current epoch based on the provided MetricTracker.
 
         Args:
-            tracker (MetricTracker): Tracker containing accumulated predictions and targets.
+            tracker (MetricTracker): The MetricTracker containing accumulated metrics for the epoch.
 
         Returns:
-            dict[str, float]: Dictionary of computed metrics for the epoch.
+            dict[str, float]: A dictionary containing the computed metrics for the epoch.
         """
         if self.task_type == "classification":
             summary = tracker.compute_classification_summary(
@@ -151,14 +206,14 @@ class Trainer:
 
     def _train_epoch(self, train_loader: DataLoader, epoch: int) -> dict[str, float]:
         """
-        Runs a single training epoch across all batches.
+        Executes a single training epoch, updating model weights and tracking metrics.
 
         Args:
-            train_loader (DataLoader): DataLoader for training dataset.
-            epoch (int): Current epoch index.
+            train_loader (DataLoader): DataLoader for the training dataset.
+            epoch (int): Current epoch number.
 
         Returns:
-            dict[str, float]: Dictionary of computed metrics for the epoch.
+            dict[str, float]: A dictionary containing the computed metrics for the training epoch.
         """
         self.model.train()
         self.train_tracker.reset()
@@ -175,7 +230,6 @@ class Trainer:
 
             self.scaler.scale(scaled_loss).backward()
 
-            # Optimizer step with accumulation and optional clipping
             if (i + 1) % self.gradient_accumulation_steps == 0 or (i + 1) == len(train_loader):
                 if self.max_grad_norm is not None:
                     self.scaler.unscale_(self.optimizer)
@@ -185,10 +239,8 @@ class Trainer:
                 self.scaler.update()
                 self.optimizer.zero_grad()
 
-            # Record batch statistics
             self.train_tracker.update_scalar("loss", loss.item(), n=y.size(0))
             self.train_tracker.update_predictions(outputs, y)
-
             pbar.set_postfix({"loss": f"{self.train_tracker.get_scalar_average('loss'):.4f}"})
 
         return self._compute_epoch_summary(self.train_tracker)
@@ -196,14 +248,14 @@ class Trainer:
 
     def _validate_epoch(self, val_loader: DataLoader, epoch: int) -> dict[str, float]:
         """
-        Runs validation evaluation across all batches without computing gradients.
+        Executes a single validation epoch, evaluating model performance on the validation dataset.
 
         Args:
-            val_loader (DataLoader): DataLoader for validation dataset.
-            epoch (int): Current epoch index.
+            val_loader (DataLoader): DataLoader for the validation dataset.
+            epoch (int): Current epoch number.
 
         Returns:
-            dict[str, float]: Dictionary of computed metrics for the epoch.
+            dict[str, float]: A dictionary containing the computed metrics for the validation epoch.
         """
         self.model.eval()
         self.val_tracker.reset()
@@ -219,7 +271,6 @@ class Trainer:
 
                 self.val_tracker.update_scalar("loss", loss.item(), n=y.size(0))
                 self.val_tracker.update_predictions(outputs, y)
-
                 pbar.set_postfix({"loss": f"{self.val_tracker.get_scalar_average('loss'):.4f}"})
 
         return self._compute_epoch_summary(self.val_tracker)
@@ -233,16 +284,17 @@ class Trainer:
         start_epoch: int = 1,
     ) -> dict[str, list[float]]:
         """
-        Executes the full training and validation pipeline across specified epochs.
+        Main training loop that iterates over epochs, performing training and validation,
+            and managing checkpoints and early stopping.
 
         Args:
-            train_loader (DataLoader): DataLoader for training dataset.
-            val_loader (DataLoader): DataLoader for validation dataset.
-            epochs (int): Target total number of epochs to train.
-            start_epoch (int): Epoch index to start/resume from. Defaults to 1.
+            train_loader (DataLoader): DataLoader for the training dataset.
+            val_loader (DataLoader): DataLoader for the validation dataset.
+            epochs (int): Total number of epochs to train.
+            start_epoch (int): Epoch number to start training from (useful for resuming).
 
         Returns:
-            dict[str, list[float]]: Complete history dictionary tracking train and val metrics per epoch.
+            dict[str, list[float]]: A dictionary containing the training history of metrics across epochs
         """
         logger.info(f"Starting model training on device '{self.device}' for {epochs - start_epoch + 1} epochs.")
 
@@ -251,48 +303,83 @@ class Trainer:
                 train_metrics = self._train_epoch(train_loader, epoch)
                 val_metrics = self._validate_epoch(val_loader, epoch)
 
-                # Append metrics to global history
                 for key, val in train_metrics.items():
                     self.history.setdefault(f"train_{key}", []).append(val)
                 for key, val in val_metrics.items():
                     self.history.setdefault(f"val_{key}", []).append(val)
 
-                # Learning rate scheduler step
                 if self.scheduler is not None:
                     if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
                         self.scheduler.step(val_metrics["loss"])
                     else:
                         self.scheduler.step()
 
-                # Dynamic logging based on primary_metric
                 metric_name = self.primary_metric
-                train_m_val = train_metrics.get(metric_name, 0.0)
                 val_m_val = val_metrics.get(metric_name, 0.0)
+                train_m_val = train_metrics.get(metric_name, 0.0)
+
+                # Check if current epoch is the best performing
+                is_best = self._is_better(val_m_val)
+                if is_best:
+                    self.best_metric_value = val_m_val
 
                 logger.info(
                     f"Epoch [{epoch:03d}/{epochs:03d}] | "
-                    f"Train Loss: {train_metrics['loss']:.4f} - Train {metric_name.replace('_', ' ').title()}: {train_m_val:.4f} | "
-                    f"Val Loss: {val_metrics['loss']:.4f} - Val {metric_name.replace('_', ' ').title()}: {val_m_val:.4f}"
+                    f"Train Loss: {train_metrics['loss']:.4f} | Train {metric_name.title()}: {train_m_val:.4f} | "
+                    f"Val Loss: {val_metrics['loss']:.4f} | Val {metric_name.title()}: {val_m_val:.4f}"
                 )
 
-                # Save checkpoint if manager is configured
+                # Save checkpoint with correct parameters
                 if self.checkpoint_manager is not None:
+                    sched_state = self.scheduler.state_dict() if self.scheduler else None
                     self.checkpoint_manager.save_checkpoint(
+                        epoch=epoch,
                         model=self.model,
                         optimizer=self.optimizer,
-                        epoch=epoch,
-                        metrics=val_metrics,
-                        scheduler=self.scheduler,
+                        metric_value=val_m_val,
+                        is_best=is_best,
+                        additional_state={"scheduler_state_dict": sched_state, "val_metrics": val_metrics},
                     )
 
-                # Check early stopping criterion
+                # No trainer.py (dentro do método fit):
                 if self.early_stopping is not None:
-                    self.early_stopping(val_metrics["loss"])
+                    if self.early_stopping.mode == "max":
+                        target_eval_metric = val_metrics.get(self.primary_metric, val_metrics["loss"])
+                    else:
+                        target_eval_metric = val_metrics["loss"] if "loss" in val_metrics else val_metrics.get(self.primary_metric)
+
+                    self.early_stopping(target_eval_metric)
                     if self.early_stopping.early_stop:
                         logger.info(f"Early stopping triggered at epoch {epoch}.")
                         break
 
         except KeyboardInterrupt:
-            logger.warning("Training process interrupted manually by user. Returning accumulated history.")
+            logger.warning("Training interrupted manually. Saving accumulated history.")
 
+        # Persist complete training history to JSON on disk
+        self._save_history_json()
         return self.history
+
+
+    def evaluate(self, test_loader: DataLoader, save_results: bool = True) -> dict[str, float]:
+        """
+        Runs evaluation on test dataset, optionally persisting 'eval_results.json' to disk.
+
+        Args:
+            test_loader (DataLoader): DataLoader for the test dataset.
+            save_results (bool): Whether to save evaluation results to 'eval_results.json'.
+
+        Returns:
+            dict[str, float]: A dictionary containing the computed metrics for the test dataset.
+        """
+        logger.info("Starting model evaluation on test set.")
+        test_metrics = self._validate_epoch(test_loader, epoch=0)
+
+        if save_results and self.checkpoint_manager is not None:
+            eval_path = self.checkpoint_manager.checkpoint_dir / "eval_results.json"
+            formatted_results = {f"test_{k}": v for k, v in test_metrics.items()}
+            with open(eval_path, "w", encoding="utf-8") as f:
+                json.dump(formatted_results, f, indent=4)
+            logger.info(f"Test evaluation results saved to: {eval_path}")
+
+        return test_metrics
