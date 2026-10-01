@@ -148,27 +148,67 @@ class Trainer:
                 json.dump(self.history, f, indent=4)
 
 
-    def _save_prediction_artifact(
-        self,
-        tracker: MetricTracker,
-        filename: str,
-        inputs: Optional[torch.Tensor] = None,
-    ) -> None:
-        """Persist raw predictions and targets already accumulated by a tracker."""
+    def _load_history_json(self) -> dict[str, list[float]]:
+        """Loads persisted training history, if available."""
         if self.checkpoint_manager is None:
-            return
+            return {}
 
-        predictions, targets = tracker.get_accumulated_tensors()
-        torch.save(
-            {
-                "y_true": targets,
-                "y_pred": predictions,
-                "inputs": inputs,
-                "task_type": self.task_type,
-                "num_classes": self.num_classes,
-            },
-            self.checkpoint_manager.checkpoint_dir / filename,
+        hist_path = self.checkpoint_manager.checkpoint_dir / "history.json"
+        if not hist_path.exists():
+            return {}
+
+        with open(hist_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+
+    def _restore_training_state(self, epochs: int, start_epoch: int) -> tuple[int, bool]:
+        """Restores the latest complete checkpoint and reports whether training is finished."""
+        if self.checkpoint_manager is None or not self.checkpoint_manager.has_checkpoint(load_best=False):
+            return start_epoch, False
+
+        checkpoint = self.checkpoint_manager.load_checkpoint(
+            self.model,
+            optimizer=self.optimizer,
+            device=self.device,
+            load_best=False,
         )
+        last_epoch = int(checkpoint.get("epoch", 0))
+        self.history = self._load_history_json()
+
+        for key, values in self.history.items():
+            self.history[key] = values[:last_epoch]
+
+        scheduler_state = checkpoint.get("scheduler_state_dict")
+        if self.scheduler is not None and scheduler_state is not None:
+            self.scheduler.load_state_dict(scheduler_state)
+
+        early_stopping_state = checkpoint.get("early_stopping_state")
+        if self.early_stopping is not None and early_stopping_state is not None:
+            self.early_stopping.counter = early_stopping_state["counter"]
+            self.early_stopping.best_score = early_stopping_state["best_score"]
+            self.early_stopping.early_stop = early_stopping_state["early_stop"]
+            self.early_stopping.is_best = early_stopping_state["is_best"]
+
+        best_metric_value = checkpoint.get("metric_value")
+        if self.checkpoint_manager.best_checkpoint_path.exists():
+            best_checkpoint = torch.load(self.checkpoint_manager.best_checkpoint_path, map_location=self.device)
+            best_metric_value = best_checkpoint.get("metric_value", best_metric_value)
+        if best_metric_value is not None:
+            self.best_metric_value = best_metric_value
+
+        early_stopped = bool(checkpoint.get("early_stopped", False))
+        training_complete = early_stopped or last_epoch >= epochs
+        return last_epoch + 1, training_complete
+
+
+    def _reset_training_state(self) -> None:
+        """Resets in-memory state before a forced training run."""
+        self.history = {}
+        self.best_metric_value = -float("inf") if self.higher_is_better else float("inf")
+        self.train_tracker.reset()
+        self.val_tracker.reset()
+        if self.early_stopping is not None:
+            self.early_stopping.reset()
 
 
     def _is_better(self, current: float) -> bool:
@@ -325,6 +365,7 @@ class Trainer:
         val_loader: DataLoader,
         epochs: int,
         start_epoch: int = 1,
+        force_retrain: bool = False,
     ) -> dict[str, list[float]]:
         """
         Main training loop that iterates over epochs, performing training and validation,
@@ -335,10 +376,24 @@ class Trainer:
             val_loader (DataLoader): DataLoader for the validation dataset.
             epochs (int): Total number of epochs to train.
             start_epoch (int): Epoch number to start training from (useful for resuming).
+            force_retrain (bool): If True, ignores existing checkpoints and starts a new run.
 
         Returns:
             dict[str, list[float]]: A dictionary containing the training history of metrics across epochs
         """
+        if force_retrain:
+            self._reset_training_state()
+            start_epoch = 1
+            if self.checkpoint_manager is not None:
+                self.checkpoint_manager.last_checkpoint_path.unlink(missing_ok=True)
+                self.checkpoint_manager.best_checkpoint_path.unlink(missing_ok=True)
+                (self.checkpoint_manager.checkpoint_dir / "history.json").unlink(missing_ok=True)
+        else:
+            start_epoch, training_complete = self._restore_training_state(epochs, start_epoch)
+            if training_complete:
+                logger.info("Training already completed. Restoring history without retraining.")
+                return self.history
+
         if self.model_gflops == 0.0:
             try:
                 # Gets the first batch from the train_loader to extract a sample tensor
@@ -391,19 +446,7 @@ class Trainer:
                     f"Val Loss: {val_metrics['loss']:.4f} | Val {metric_name.title()}: {val_m_val:.4f}"
                 )
 
-                # Save checkpoint with correct parameters
-                if self.checkpoint_manager is not None:
-                    sched_state = self.scheduler.state_dict() if self.scheduler else None
-                    self.checkpoint_manager.save_checkpoint(
-                        epoch=epoch,
-                        model=self.model,
-                        optimizer=self.optimizer,
-                        metric_value=val_m_val,
-                        is_best=is_best,
-                        additional_state={"scheduler_state_dict": sched_state, "val_metrics": val_metrics},
-                    )
-
-                # No trainer.py (dentro do método fit):
+                early_stopped = False
                 if self.early_stopping is not None:
                     if self.early_stopping.mode == "max":
                         target_eval_metric = val_metrics.get(self.primary_metric, val_metrics["loss"])
@@ -412,17 +455,45 @@ class Trainer:
 
                     self.early_stopping(target_eval_metric)
                     if self.early_stopping.early_stop:
+                        early_stopped = True
                         logger.info(f"Early stopping triggered at epoch {epoch}.")
-                        break
+
+                # Save the state only after the complete epoch and its stopping decision.
+                if self.checkpoint_manager is not None:
+                    sched_state = self.scheduler.state_dict() if self.scheduler else None
+                    early_stopping_state = None
+                    if self.early_stopping is not None:
+                        early_stopping_state = {
+                            "counter": self.early_stopping.counter,
+                            "best_score": self.early_stopping.best_score,
+                            "early_stop": self.early_stopping.early_stop,
+                            "is_best": self.early_stopping.is_best,
+                        }
+                    self.checkpoint_manager.save_checkpoint(
+                        epoch=epoch,
+                        model=self.model,
+                        optimizer=self.optimizer,
+                        metric_value=val_m_val,
+                        is_best=is_best,
+                        additional_state={
+                            "scheduler_state_dict": sched_state,
+                            "val_metrics": val_metrics,
+                            "target_epochs": epochs,
+                            "early_stopped": early_stopped,
+                            "training_complete": epoch >= epochs or early_stopped,
+                            "early_stopping_state": early_stopping_state,
+                        },
+                    )
+                    self._save_history_json()
+
+                if early_stopped:
+                    break
 
         except KeyboardInterrupt:
             logger.warning("Training interrupted manually. Saving accumulated history.")
 
         # Persist complete training history to JSON on disk
         self._save_history_json()
-        if self.checkpoint_manager is not None:
-            self._save_prediction_artifact(self.train_tracker, "train_predictions.pt")
-            self._save_prediction_artifact(self.val_tracker, "validation_predictions.pt")
         return self.history
 
 
@@ -440,16 +511,20 @@ class Trainer:
         logger.info("Starting model evaluation on test set.")
         test_metrics = self._validate_epoch(test_loader, epoch=0, collect_inputs=True)
 
+        predictions, targets = self.val_tracker.get_accumulated_tensors()
         if self.checkpoint_manager is not None:
-            self._save_prediction_artifact(
-                self.val_tracker,
-                "evaluation_predictions.pt",
-                inputs=getattr(self, "_last_evaluation_inputs", None),
+            predictions_path = self.checkpoint_manager.checkpoint_dir / "evaluation_predictions.pt"
+            torch.save(
+                {
+                    "y_true": targets,
+                    "y_pred": predictions,
+                    "inputs": getattr(self, "_last_evaluation_inputs", None),
+                    "task_type": self.task_type,
+                    "num_classes": self.num_classes,
+                },
+                predictions_path,
             )
-            logger.info(
-                "Evaluation predictions saved to: "
-                f"{self.checkpoint_manager.checkpoint_dir / 'evaluation_predictions.pt'}"
-            )
+            logger.info(f"Evaluation predictions saved to: {predictions_path}")
 
         if save_results and self.checkpoint_manager is not None:
             eval_path = self.checkpoint_manager.checkpoint_dir / "eval_results.json"
