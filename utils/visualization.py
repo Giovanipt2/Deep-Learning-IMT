@@ -3,7 +3,7 @@ Data Visualization and Model Plotting Utilities.
 
 Provides a comprehensive suite of visualization functions for Exploratory Data Analysis (EDA),
 Dimensionality Reduction, Model Evaluation (Classification & Regression), and Explainable AI (XAI).
-All functions return matplotlib Figure objects for flexible rendering, customization, or saving.
+ Plotting functions save figures under ``figures/{artifact_name}`` and close them after saving.
 """
 
 import math
@@ -60,6 +60,49 @@ def _format_scale(x: float, pos: Any = None) -> str:
     return str(int(x))
 
 
+def _save_figure(fig: plt.Figure, artifact_name: str, filename: str) -> None:
+    """Save a figure in the standard figures/{artifact_name} directory."""
+    output_dir = Path("figures") / artifact_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_dir / filename, bbox_inches="tight")
+    plt.close(fig)
+
+
+def load_evaluation_artifacts(
+    model_name: str,
+    checkpoint_root: Union[str, Path] = "checkpoints",
+) -> Dict[str, Any]:
+    """Load persisted evaluation outputs and derive plot-ready predictions."""
+    artifact_path = Path(checkpoint_root) / model_name / "evaluation_predictions.pt"
+    if not artifact_path.exists():
+        raise FileNotFoundError(f"Evaluation artifact not found: {artifact_path}")
+
+    data = torch.load(artifact_path, map_location="cpu", weights_only=False)
+    y_true = data["y_true"]
+    raw_predictions = data["y_pred"]
+    task_type = data.get("task_type", "classification")
+
+    if task_type == "classification":
+        if raw_predictions.ndim > 1 and raw_predictions.shape[1] > 1:
+            y_probs = torch.softmax(raw_predictions, dim=1)
+            y_pred = torch.argmax(raw_predictions, dim=1)
+        else:
+            y_probs = torch.sigmoid(raw_predictions.reshape(-1))
+            y_pred = (y_probs >= 0.5).long()
+    else:
+        y_probs = None
+        y_pred = raw_predictions
+
+    return {
+        "y_true": y_true,
+        "y_pred": y_pred,
+        "y_probs": y_probs,
+        "inputs": data.get("inputs"),
+        "task_type": task_type,
+        "num_classes": data.get("num_classes"),
+    }
+
+
 # =====================================================================
 # 1. Exploratory Data Analysis (EDA)
 # =====================================================================
@@ -71,7 +114,8 @@ def plot_correlation_heatmap(
     top_k: Optional[int] = None,
     method: str = "pearson",
     figsize: Tuple[int, int] = (10, 8),
-) -> plt.Figure:
+    artifact_name: str = "dataset",
+) -> None:
     """
     Plots a feature correlation heatmap using Pearson, Spearman, or Kendall correlation.
 
@@ -118,7 +162,7 @@ def plot_correlation_heatmap(
     ax.set_title(title, fontsize=14, pad=15)
 
     fig.tight_layout()
-    return fig
+    _save_figure(fig, artifact_name, "correlation_heatmap.png")
 
 
 def plot_distribution(
@@ -126,7 +170,8 @@ def plot_distribution(
     columns: Optional[List[str]] = None,
     max_cols: int = 3,
     figsize_per_row: Tuple[int, int] = (15, 4),
-) -> plt.Figure:
+    artifact_name: str = "dataset",
+) -> None:
     """
     Plots histograms with KDE curves for numerical features in a grid layout.
 
@@ -160,10 +205,14 @@ def plot_distribution(
         axes[j].axis("off")
 
     fig.tight_layout()
-    return fig
+    _save_figure(fig, artifact_name, "distribution.png")
 
 
-def plot_missing_values(df: pd.DataFrame, figsize: Tuple[int, int] = (12, 6)) -> plt.Figure:
+def plot_missing_values(
+    df: pd.DataFrame,
+    figsize: Tuple[int, int] = (12, 6),
+    artifact_name: str = "dataset",
+) -> None:
     """
     Plots a matrix identifying missing values patterns (black = missing, light = present).
 
@@ -181,7 +230,7 @@ def plot_missing_values(df: pd.DataFrame, figsize: Tuple[int, int] = (12, 6)) ->
     ax.set_xlabel("Features (Columns)", fontsize=12)
 
     fig.tight_layout()
-    return fig
+    _save_figure(fig, artifact_name, "missing_values.png")
 
 
 def plot_grouped_boxplots(
@@ -190,7 +239,8 @@ def plot_grouped_boxplots(
     num_cols: List[str],
     max_cols: int = 3,
     figsize_per_row: Tuple[int, int] = (15, 4),
-) -> plt.Figure:
+    artifact_name: str = "dataset",
+) -> None:
     """
     Plots a grid of boxplots for numeric features grouped by target class categories.
 
@@ -217,10 +267,14 @@ def plot_grouped_boxplots(
         axes[j].axis("off")
 
     fig.tight_layout()
-    return fig
+    _save_figure(fig, artifact_name, "grouped_boxplots.png")
 
 
-def plot_variable_types(df: pd.DataFrame, figsize: Tuple[int, int] = (8, 5)) -> plt.Figure:
+def plot_variable_types(
+    df: pd.DataFrame,
+    figsize: Tuple[int, int] = (8, 5),
+    artifact_name: str = "dataset",
+) -> None:
     """
     Plots a summary bar chart showing counts of dataset feature data types.
 
@@ -244,7 +298,7 @@ def plot_variable_types(df: pd.DataFrame, figsize: Tuple[int, int] = (8, 5)) -> 
 
     ax.set_ylabel("Number of Columns", fontsize=12)
     fig.tight_layout()
-    return fig
+    _save_figure(fig, artifact_name, "variable_types.png")
 
 
 # =====================================================================
@@ -256,7 +310,8 @@ def plot_pca_variance(
     pca_info: Dict[str, Any],
     cut_off: Optional[float] = None,
     figsize: Tuple[int, int] = (14, 5),
-) -> plt.Figure:
+    artifact_name: str = "dataset",
+) -> None:
     """
     Plots 1x2 figure showing individual explained variance bars and cumulative variance line.
 
@@ -299,7 +354,7 @@ def plot_pca_variance(
         ax2.legend()
 
     fig.tight_layout()
-    return fig
+    _save_figure(fig, artifact_name, "pca_variance.png")
 
 
 def plot_embeddings_2d(
@@ -307,7 +362,8 @@ def plot_embeddings_2d(
     labels: Optional[Union[np.ndarray, list]] = None,
     title: str = "2D Embeddings Visualization",
     figsize: Tuple[int, int] = (8, 6),
-) -> plt.Figure:
+    artifact_name: str = "dataset",
+) -> None:
     """
     Plots 2D scatter plot for dimensional reduction embeddings.
 
@@ -335,7 +391,7 @@ def plot_embeddings_2d(
     ax.set_ylabel("Dimension 2", fontsize=12)
 
     fig.tight_layout()
-    return fig
+    _save_figure(fig, artifact_name, "embeddings_2d.png")
 
 
 def plot_embeddings_3d(
@@ -343,7 +399,8 @@ def plot_embeddings_3d(
     labels: Optional[Union[np.ndarray, list]] = None,
     title: str = "3D Embeddings Visualization",
     figsize: Tuple[int, int] = (9, 7),
-) -> plt.Figure:
+    artifact_name: str = "dataset",
+) -> None:
     """
     Plots 3D scatter plot for dimensional reduction embeddings.
 
@@ -372,7 +429,7 @@ def plot_embeddings_3d(
     ax.set_ylabel("Dim 2")
     ax.set_zlabel("Dim 3")
     fig.tight_layout()
-    return fig
+    _save_figure(fig, artifact_name, "embeddings_3d.png")
 
 
 # =====================================================================
@@ -384,7 +441,8 @@ def plot_training_history(
     history: Dict[str, List[float]],
     metric_name: str = "accuracy",
     figsize: Tuple[int, int] = (12, 5),
-) -> plt.Figure:
+    artifact_name: str = "model",
+) -> None:
     """
     Plots 1x2 training history curves (Loss and Metric) comparing train vs validation.
 
@@ -430,7 +488,7 @@ def plot_training_history(
         ax2.grid(True, linestyle="--", alpha=0.5)
 
     fig.tight_layout()
-    return fig
+    _save_figure(fig, artifact_name, "training_history.png")
 
 
 def plot_confusion_matrix(
@@ -439,7 +497,8 @@ def plot_confusion_matrix(
     class_names: Optional[List[str]] = None,
     normalize: bool = False,
     figsize: Tuple[int, int] = (8, 6),
-) -> plt.Figure:
+    artifact_name: str = "model",
+) -> None:
     """
     Plots normalized or raw confusion matrix heatmap for classification evaluation.
 
@@ -477,7 +536,8 @@ def plot_confusion_matrix(
     ax.set_xlabel("Predicted Class", fontsize=12)
 
     fig.tight_layout()
-    return fig
+    filename = "confusion_matrix_normalized.png" if normalize else "confusion_matrix.png"
+    _save_figure(fig, artifact_name, filename)
 
 
 def plot_sample_predictions(
@@ -487,7 +547,8 @@ def plot_sample_predictions(
     class_names: Optional[List[str]] = None,
     max_samples: int = 15,
     figsize: Tuple[int, int] = (15, 9),
-) -> plt.Figure:
+    artifact_name: str = "model",
+) -> None:
     """
     Plots a grid of sample images with titles colored green (correct) or red (incorrect).
 
@@ -536,7 +597,7 @@ def plot_sample_predictions(
         axes[j].axis("off")
 
     fig.tight_layout()
-    return fig
+    _save_figure(fig, artifact_name, "sample_predictions.png")
 
 
 def plot_roc_curves(
@@ -544,7 +605,8 @@ def plot_roc_curves(
     y_probs: Union[np.ndarray, torch.Tensor],
     class_names: Optional[List[str]] = None,
     figsize: Tuple[int, int] = (8, 6),
-) -> plt.Figure:
+    artifact_name: str = "model",
+) -> None:
     """
     Plots Receiver Operating Characteristic (ROC) curves and calculates AUC for binary or multi-class.
 
@@ -586,14 +648,15 @@ def plot_roc_curves(
     ax.grid(True, linestyle="--", alpha=0.5)
 
     fig.tight_layout()
-    return fig
+    _save_figure(fig, artifact_name, "roc_curves.png")
 
 
 def plot_regression_residuals(
     y_true: Union[np.ndarray, list, torch.Tensor],
     y_pred: Union[np.ndarray, list, torch.Tensor],
     figsize: Tuple[int, int] = (14, 5),
-) -> plt.Figure:
+    artifact_name: str = "model",
+) -> None:
     """
     Plots 1x2 figure showing Predicted vs Actual scatter and Residuals vs Predicted plot.
 
@@ -629,7 +692,46 @@ def plot_regression_residuals(
     ax2.grid(True, linestyle="--", alpha=0.5)
 
     fig.tight_layout()
-    return fig
+    _save_figure(fig, artifact_name, "regression_residuals.png")
+
+
+def plot_saved_evaluation_artifacts(
+    model_name: str,
+    class_names: Optional[List[str]] = None,
+    normalize_confusion_matrix: bool = False,
+    checkpoint_root: Union[str, Path] = "checkpoints",
+) -> None:
+    """Generate evaluation plots from the single persisted test pass."""
+    artifacts = load_evaluation_artifacts(model_name, checkpoint_root=checkpoint_root)
+
+    if artifacts["task_type"] == "classification":
+        plot_confusion_matrix(
+            artifacts["y_true"],
+            artifacts["y_pred"],
+            class_names=class_names,
+            normalize=normalize_confusion_matrix,
+            artifact_name=model_name,
+        )
+        plot_roc_curves(
+            artifacts["y_true"],
+            artifacts["y_probs"],
+            class_names=class_names,
+            artifact_name=model_name,
+        )
+        if artifacts["inputs"] is not None:
+            plot_sample_predictions(
+                artifacts["inputs"],
+                artifacts["y_true"][: len(artifacts["inputs"])],
+                artifacts["y_pred"][: len(artifacts["inputs"])],
+                class_names=class_names,
+                artifact_name=model_name,
+            )
+    else:
+        plot_regression_residuals(
+            artifacts["y_true"],
+            artifacts["y_pred"],
+            artifact_name=model_name,
+        )
 
 
 def plot_model_comparison(
@@ -638,7 +740,8 @@ def plot_model_comparison(
     metrics: Optional[Union[List[float], Dict[str, float]]] = None,
     metric_key: str = "test_accuracy",
     figsize: Tuple[int, int] = (14, 5),
-) -> plt.Figure:
+    artifact_name: str = "model_comparison",
+) -> None:
     """
     Plots 1x2 figure comparing Model Metric vs Parameters and GFLOPs with K/M/B scales.
 
@@ -724,7 +827,7 @@ def plot_model_comparison(
     ax2.grid(True, linestyle="--", alpha=0.5)
 
     fig.tight_layout()
-    return fig
+    _save_figure(fig, artifact_name, "model_comparison.png")
 
 
 # =====================================================================
@@ -737,7 +840,8 @@ def plot_feature_maps(
     max_maps: int = 16,
     cols: int = 4,
     figsize_per_row: Tuple[int, int] = (12, 3),
-) -> plt.Figure:
+    artifact_name: str = "model",
+) -> None:
     """
     Plots intermediate CNN activation maps in a grid layout.
 
@@ -769,7 +873,7 @@ def plot_feature_maps(
         axes[j].axis("off")
 
     fig.tight_layout()
-    return fig
+    _save_figure(fig, artifact_name, "feature_maps.png")
 
 
 def plot_grad_cam(
@@ -778,7 +882,8 @@ def plot_grad_cam(
     alpha: float = 0.5,
     title: str = "Grad-CAM Heatmap Overlay",
     figsize: Tuple[int, int] = (10, 5),
-) -> plt.Figure:
+    artifact_name: str = "model",
+) -> None:
     """
     Plots side-by-side comparison of original image and overlaid Grad-CAM heatmap.
 
@@ -812,7 +917,7 @@ def plot_grad_cam(
     ax2.axis("off")
 
     fig.tight_layout()
-    return fig
+    _save_figure(fig, artifact_name, "grad_cam.png")
 
 
 def plot_feature_importance(
@@ -821,7 +926,8 @@ def plot_feature_importance(
     top_n: Optional[int] = None,
     title: str = "Feature Importance Attributions",
     figsize: Tuple[int, int] = (10, 6),
-) -> plt.Figure:
+    artifact_name: str = "model",
+) -> None:
     """
     Plots horizontal bar chart ranking feature attributions/importance scores.
 
@@ -859,4 +965,4 @@ def plot_feature_importance(
     ax.grid(True, linestyle="--", alpha=0.5)
 
     fig.tight_layout()
-    return fig
+    _save_figure(fig, artifact_name, "feature_importance.png")
