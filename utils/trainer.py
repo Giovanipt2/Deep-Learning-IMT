@@ -16,6 +16,7 @@ from utils.checkpoint import CheckpointManager
 from utils.device import get_device
 from utils.early_stopping import EarlyStopping
 from utils.metrics import MetricTracker
+from utils import get_model_gflops, get_model_parameters
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +106,13 @@ class Trainer:
 
         # Metadata tracking for plot_model_comparison
         self.model_name = model_name
-        self.model_params = model_params
+
+        # Extract model parameters and GFLOPS if not provided
+        if model_params == 0:
+            self.model_params = get_model_parameters(model)
+        else:
+            self.model_params = model_params
+
         self.model_gflops = model_gflops
 
         # Scaler for AMP
@@ -296,6 +303,25 @@ class Trainer:
         Returns:
             dict[str, list[float]]: A dictionary containing the training history of metrics across epochs
         """
+        if self.model_gflops == 0.0:
+            try:
+                # Gets the first batch from the train_loader to extract a sample tensor
+                first_batch = next(iter(train_loader))
+                x_sample, _ = self._prepare_batch(first_batch)
+
+                # Calculates GFLOPs using the actual input tensor from the first batch
+                self.model_gflops = get_model_gflops(
+                    model=self.model,
+                    input_data_or_size=x_sample[:1],
+                    device=self.device
+                )
+
+                # If there is a checkpoint_manager, update the metadata.json with the computed GFLOPs
+                if self.checkpoint_manager is not None:
+                    self._save_metadata_json()
+            except Exception as e:
+                logger.warning(f"Could not automatically compute GFLOPs from train_loader: {e}")
+
         logger.info(f"Starting model training on device '{self.device}' for {epochs - start_epoch + 1} epochs.")
 
         try:
