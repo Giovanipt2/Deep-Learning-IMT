@@ -73,7 +73,7 @@ def _save_figure(fig: plt.Figure, output_name: str, filename: str) -> None:
     Returns:
         None: The figure is saved and displayed in place.
     """
-    if not output_name or output_name in {"dataset", "model", "model_comparison"}:
+    if not output_name or output_name in {"dataset", "model"}:
         raise ValueError(
             "output_name must identify the dataset or model, for example "
             "'MNIST', 'CIFAR10', or 'mnist_simple_ffn'."
@@ -746,70 +746,52 @@ def plot_regression_residuals(
 
 
 def plot_model_comparison(
-    models_input: Union[List[Dict[str, Any]], List[Union[str, Path]]],
-    model_name: str,
+    model_names: List[str],
+    dataset_name: str,
     metric_name: str = "Accuracy",
-    metrics: Optional[Union[List[float], Dict[str, float]]] = None,
     metric_key: str = "test_accuracy",
+    checkpoint_root: Union[str, Path] = "checkpoints",
     figsize: Tuple[int, int] = (14, 5),
 ) -> None:
     """
     Plots 1x2 figure comparing Model Metric vs Parameters and GFLOPs with K/M/B scales.
 
     Args:
-        models_input (Union[List[Dict], List[str/Path]]): Either a list of dictionaries with model specs
-            or a list of directory paths containing 'metadata.json'.
+        model_names (List[str]): Names of the models to compare. Each name must
+            correspond to a directory under checkpoint_root.
+        dataset_name (str): Dataset name used as the output directory.
         metric_name (str): Display name for the metric axis (e.g., 'Accuracy', 'F1-Score').
-        metrics (Optional[Union[List[float], Dict[str, float]]]): Explicit metric values passed as a
-            list matching model_dirs order or a dict mapping model names/folder names to values.
         metric_key (str): Key to look for inside 'eval_results.json' if loading automatically from folder.
+        checkpoint_root (Union[str, Path]): Root directory containing model checkpoint directories.
         figsize (Tuple[int, int]): Matplotlib figure dimensions.
-        model_name (str): Name used as the output directory for the comparison figure.
 
     Returns:
         None: The model comparison figure is saved and displayed in place.
     """
     models_data = []
 
-    # Check if input is a list of directory paths
-    if models_input and isinstance(models_input[0], (str, Path)):
-        for idx, model_dir in enumerate(models_input):
-            model_path = Path(model_dir)
-            meta_path = model_path / "metadata.json"
-            eval_path = model_path / "eval_results.json"
+    for model_name in model_names:
+        model_path = Path(checkpoint_root) / model_name
+        meta_path = model_path / "metadata.json"
+        eval_path = model_path / "eval_results.json"
 
-            if not meta_path.exists():
-                raise FileNotFoundError(f"Arquivo metadata.json não encontrado em: {model_path}")
+        if not meta_path.exists():
+            raise FileNotFoundError(f"Metadata file not found: {meta_path}")
+        if not eval_path.exists():
+            raise FileNotFoundError(f"Evaluation results file not found: {eval_path}")
 
-            with open(meta_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+        with open(meta_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        with open(eval_path, "r", encoding="utf-8") as f:
+            eval_data = json.load(f)
 
-            model_name = data.get("name", model_path.name)
-            m_val = None
+        metric_value = eval_data.get(metric_key)
+        if metric_value is None:
+            raise ValueError(f"Metric '{metric_key}' was not found in: {eval_path}")
 
-            # 1. Tenta obter métrica do parâmetro explícito 'metrics'
-            if isinstance(metrics, dict):
-                m_val = metrics.get(model_name, metrics.get(model_path.name))
-            elif isinstance(metrics, list) and idx < len(metrics):
-                m_val = metrics[idx]
-
-            # 2. Se não foi passada explicitamente, busca no 'eval_results.json'
-            if m_val is None and eval_path.exists():
-                with open(eval_path, "r", encoding="utf-8") as f:
-                    eval_data = json.load(f)
-                    m_val = eval_data.get(metric_key)
-
-            if m_val is None:
-                raise ValueError(
-                    f"Métrica para o modelo '{model_name}' não foi encontrada. "
-                    f"Passe o parâmetro 'metrics' ou garanta que '{eval_path}' contenha a chave '{metric_key}'."
-                )
-
-            data["metric"] = m_val
-            models_data.append(data)
-    else:
-        # Se já for a lista de dicionários
-        models_data = models_input
+        data["name"] = data.get("name", model_name)
+        data["metric"] = metric_value
+        models_data.append(data)
 
     names = [d["name"] for d in models_data]
     metric_vals = [d["metric"] for d in models_data]
@@ -839,7 +821,7 @@ def plot_model_comparison(
     ax2.grid(True, linestyle="--", alpha=0.5)
 
     fig.tight_layout()
-    _save_figure(fig, model_name, "model_comparison.png")
+    _save_figure(fig, f"{dataset_name}", "model_comparison.png")
 
 
 # =====================================================================
