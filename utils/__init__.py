@@ -28,6 +28,7 @@ from .metrics import (
     calculate_rmse,
     calculate_roc_auc,
 )
+from utils.model_utils import get_model_gflops, get_model_parameters
 from .trainer import Trainer
 from .visualization import (
     plot_confusion_matrix,
@@ -94,4 +95,7 @@ __all__ = [
     "plot_feature_maps",
     "plot_grad_cam",
     "plot_feature_importance",
+    # Model Utilities
+    "get_model_parameters",
+    "get_model_gflops",
 ]
