@@ -18,7 +18,8 @@ def setup_logger(
     """
     Configures and returns a logger instance with formatted console and optional file handlers.
 
-    Prevents handler duplication if the logger has already been initialized.
+    Reuses existing handlers when possible and replaces an existing file handler when
+    a new log path is requested.
 
     Args:
         name (str): Name of the logger instance. Defaults to "" (root logger).
@@ -33,26 +34,39 @@ def setup_logger(
     logger = logging.getLogger(name)
     logger.setLevel(level)
 
-    # Avoid adding duplicate handlers if the logger is already configured
-    if logger.hasHandlers():
-        return logger
-
     formatter = logging.Formatter(
         fmt="[%(asctime)s][%(levelname)s][%(name)s]: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # Stream handler for console output
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+    has_console_handler = any(
+        isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler)
+        for handler in logger.handlers
+    )
+    if not has_console_handler:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
 
-    # File handler for disk logging
     if log_file is not None:
         file_path = Path(log_file)
         file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(file_path, encoding="utf-8")
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+        resolved_path = file_path.resolve()
+        file_handlers = [
+            handler for handler in logger.handlers if isinstance(handler, logging.FileHandler)
+        ]
+        matching_handler = next(
+            (handler for handler in file_handlers if Path(handler.baseFilename).resolve() == resolved_path),
+            None,
+        )
+
+        if matching_handler is None:
+            for handler in file_handlers:
+                logger.removeHandler(handler)
+                handler.close()
+
+            file_handler = logging.FileHandler(file_path, encoding="utf-8")
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
 
     return logger
