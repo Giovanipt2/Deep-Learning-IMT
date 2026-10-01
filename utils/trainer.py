@@ -148,6 +148,29 @@ class Trainer:
                 json.dump(self.history, f, indent=4)
 
 
+    def _save_prediction_artifact(
+        self,
+        tracker: MetricTracker,
+        filename: str,
+        inputs: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Persist raw predictions and targets already accumulated by a tracker."""
+        if self.checkpoint_manager is None:
+            return
+
+        predictions, targets = tracker.get_accumulated_tensors()
+        torch.save(
+            {
+                "y_true": targets,
+                "y_pred": predictions,
+                "inputs": inputs,
+                "task_type": self.task_type,
+                "num_classes": self.num_classes,
+            },
+            self.checkpoint_manager.checkpoint_dir / filename,
+        )
+
+
     def _is_better(self, current: float) -> bool:
         """
         Checks if current metric value improves upon best recorded metric.
@@ -253,7 +276,13 @@ class Trainer:
         return self._compute_epoch_summary(self.train_tracker)
 
 
-    def _validate_epoch(self, val_loader: DataLoader, epoch: int) -> dict[str, float]:
+    def _validate_epoch(
+        self,
+        val_loader: DataLoader,
+        epoch: int,
+        collect_inputs: bool = False,
+        max_inputs: int = 15,
+    ) -> dict[str, float]:
         """
         Executes a single validation epoch, evaluating model performance on the validation dataset.
 
@@ -266,6 +295,7 @@ class Trainer:
         """
         self.model.eval()
         self.val_tracker.reset()
+        evaluation_inputs: list[torch.Tensor] = []
 
         pbar = tqdm(val_loader, desc=f"Epoch {epoch:03d} [Val]", leave=False)
         with torch.no_grad():
@@ -278,7 +308,13 @@ class Trainer:
 
                 self.val_tracker.update_scalar("loss", loss.item(), n=y.size(0))
                 self.val_tracker.update_predictions(outputs, y)
+                if collect_inputs and isinstance(x, torch.Tensor) and sum(item.size(0) for item in evaluation_inputs) < max_inputs:
+                    remaining = max_inputs - sum(item.size(0) for item in evaluation_inputs)
+                    evaluation_inputs.append(x[:remaining].detach().cpu())
                 pbar.set_postfix({"loss": f"{self.val_tracker.get_scalar_average('loss'):.4f}"})
+
+        if collect_inputs:
+            self._last_evaluation_inputs = torch.cat(evaluation_inputs, dim=0) if evaluation_inputs else None
 
         return self._compute_epoch_summary(self.val_tracker)
 
@@ -384,6 +420,9 @@ class Trainer:
 
         # Persist complete training history to JSON on disk
         self._save_history_json()
+        if self.checkpoint_manager is not None:
+            self._save_prediction_artifact(self.train_tracker, "train_predictions.pt")
+            self._save_prediction_artifact(self.val_tracker, "validation_predictions.pt")
         return self.history
 
 
@@ -399,7 +438,18 @@ class Trainer:
             dict[str, float]: A dictionary containing the computed metrics for the test dataset.
         """
         logger.info("Starting model evaluation on test set.")
-        test_metrics = self._validate_epoch(test_loader, epoch=0)
+        test_metrics = self._validate_epoch(test_loader, epoch=0, collect_inputs=True)
+
+        if self.checkpoint_manager is not None:
+            self._save_prediction_artifact(
+                self.val_tracker,
+                "evaluation_predictions.pt",
+                inputs=getattr(self, "_last_evaluation_inputs", None),
+            )
+            logger.info(
+                "Evaluation predictions saved to: "
+                f"{self.checkpoint_manager.checkpoint_dir / 'evaluation_predictions.pt'}"
+            )
 
         if save_results and self.checkpoint_manager is not None:
             eval_path = self.checkpoint_manager.checkpoint_dir / "eval_results.json"
