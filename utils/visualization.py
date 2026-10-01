@@ -60,8 +60,25 @@ def _format_scale(x: float, pos: Any = None) -> str:
     return str(int(x))
 
 
-def _save_figure(fig: plt.Figure, artifact_name: str, filename: str) -> None:
-    """Save a figure in the standard figures/{artifact_name} directory."""
+def _save_figure(fig: plt.Figure, artifact_name: Optional[str], filename: str) -> None:
+    """
+    Saves a figure in the standard ``figures/{artifact_name}`` directory,
+    displays it once, and closes it to release resources.
+
+    Args:
+        fig (plt.Figure): Figure to save and display.
+        artifact_name (Optional[str]): Dataset or model name used as the output directory.
+        filename (str): Filename to use for the saved figure.
+
+    Returns:
+        None: The figure is saved and displayed in place.
+    """
+    if not artifact_name or artifact_name in {"dataset", "model", "model_comparison"}:
+        raise ValueError(
+            "artifact_name must identify the dataset or model, for example "
+            "'MNIST', 'CIFAR10', or 'mnist_simple_ffn'."
+        )
+
     output_dir = Path("figures") / artifact_name
     output_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_dir / filename, bbox_inches="tight")
@@ -73,7 +90,17 @@ def load_evaluation_artifacts(
     model_name: str,
     checkpoint_root: Union[str, Path] = "checkpoints",
 ) -> Dict[str, Any]:
-    """Load persisted evaluation outputs and derive plot-ready predictions."""
+    """
+    Loads persisted evaluation outputs and derives plot-ready predictions.
+
+    Args:
+        model_name (str): Name of the model whose evaluation artifacts are loaded.
+        checkpoint_root (Union[str, Path]): Root directory containing model checkpoints.
+
+    Returns:
+        Dict[str, Any]: Dictionary containing targets, predictions, probabilities,
+        optional inputs, task type, and number of classes.
+    """
     artifact_path = Path(checkpoint_root) / model_name / "evaluation_predictions.pt"
     if not artifact_path.exists():
         raise FileNotFoundError(f"Evaluation artifact not found: {artifact_path}")
@@ -115,7 +142,7 @@ def plot_correlation_heatmap(
     top_k: Optional[int] = None,
     method: str = "pearson",
     figsize: Tuple[int, int] = (10, 8),
-    artifact_name: str = "dataset",
+    artifact_name: Optional[str] = None,
 ) -> None:
     """
     Plots a feature correlation heatmap using Pearson, Spearman, or Kendall correlation.
@@ -126,9 +153,10 @@ def plot_correlation_heatmap(
         top_k (Optional[int]): Total number of top correlated features to display with target.
         method (str): Correlation method: 'pearson', 'spearman', or 'kendall'. Default is 'pearson'.
         figsize (Tuple[int, int]): Size of the matplotlib figure.
+        artifact_name (Optional[str]): Dataset name used as the output directory.
 
     Returns:
-        plt.Figure: Matplotlib Figure object containing the heatmap.
+        None: The heatmap figure is saved and displayed in place.
     """
     num_df = df.select_dtypes(include=[np.number])
     corr = num_df.corr(method=method)
@@ -171,7 +199,7 @@ def plot_distribution(
     columns: Optional[List[str]] = None,
     max_cols: int = 3,
     figsize_per_row: Tuple[int, int] = (15, 4),
-    artifact_name: str = "dataset",
+    artifact_name: Optional[str] = None,
 ) -> None:
     """
     Plots histograms with KDE curves for numerical features in a grid layout.
@@ -182,9 +210,10 @@ def plot_distribution(
             columns are plotted.
         max_cols (int): Maximum number of columns in the grid layout.
         figsize_per_row (Tuple[int, int]): Figure size per row of subplots.
+        artifact_name (Optional[str]): Dataset name used as the output directory.
 
     Returns:
-        plt.Figure: Matplotlib Figure object containing the distribution plots.
+        None: The distribution figure is saved and displayed in place.
     """
     if columns is None:
         columns = list(df.select_dtypes(include=[np.number]).columns)
@@ -212,7 +241,7 @@ def plot_distribution(
 def plot_missing_values(
     df: pd.DataFrame,
     figsize: Tuple[int, int] = (12, 6),
-    artifact_name: str = "dataset",
+    artifact_name: Optional[str] = None,
 ) -> None:
     """
     Plots a matrix identifying missing values patterns (black = missing, light = present).
@@ -220,9 +249,10 @@ def plot_missing_values(
     Args:
         df (pd.DataFrame): Input DataFrame to analyze for missing values.
         figsize (Tuple[int, int]): Figure size for the missing values matrix.
+        artifact_name (Optional[str]): Dataset name used as the output directory.
 
     Returns:
-        plt.Figure: Matplotlib Figure object containing the missing values matrix.
+        None: The missing values figure is saved and displayed in place.
     """
     fig, ax = plt.subplots(figsize=figsize)
     sns.heatmap(df.isnull(), cbar=False, cmap="binary", yticklabels=False, ax=ax)
@@ -240,7 +270,7 @@ def plot_grouped_boxplots(
     num_cols: List[str],
     max_cols: int = 3,
     figsize_per_row: Tuple[int, int] = (15, 4),
-    artifact_name: str = "dataset",
+    artifact_name: Optional[str] = None,
 ) -> None:
     """
     Plots a grid of boxplots for numeric features grouped by target class categories.
@@ -251,9 +281,10 @@ def plot_grouped_boxplots(
         num_cols (List[str]): List of numeric columns to plot.
         max_cols (int): Maximum number of columns in the grid layout.
         figsize_per_row (Tuple[int, int]): Figure size per row of subplots.
+        artifact_name (Optional[str]): Dataset name used as the output directory.
 
     Returns:
-        plt.Figure: Matplotlib Figure object containing the grouped boxplots.
+        None: The grouped boxplots figure is saved and displayed in place.
     """
     n_features = len(num_cols)
     rows = math.ceil(n_features / max_cols)
@@ -274,7 +305,7 @@ def plot_grouped_boxplots(
 def plot_variable_types(
     df: pd.DataFrame,
     figsize: Tuple[int, int] = (8, 5),
-    artifact_name: str = "dataset",
+    artifact_name: Optional[str] = None,
 ) -> None:
     """
     Plots a summary bar chart showing counts of dataset feature data types.
@@ -282,9 +313,10 @@ def plot_variable_types(
     Args:
         df (pd.DataFrame): Input DataFrame containing features.
         figsize (Tuple[int, int]): Figure size for the bar chart.
+        artifact_name (Optional[str]): Dataset name used as the output directory.
 
     Returns:
-        plt.Figure: Matplotlib Figure object containing the variable types bar chart.
+        None: The variable types figure is saved and displayed in place.
     """
     dtypes_summary = df.dtypes.astype(str).value_counts()
     fig, ax = plt.subplots(figsize=figsize)
@@ -311,7 +343,7 @@ def plot_pca_variance(
     pca_info: Dict[str, Any],
     cut_off: Optional[float] = None,
     figsize: Tuple[int, int] = (14, 5),
-    artifact_name: str = "dataset",
+    artifact_name: Optional[str] = None,
 ) -> None:
     """
     Plots 1x2 figure showing individual explained variance bars and cumulative variance line.
@@ -322,9 +354,10 @@ def plot_pca_variance(
             - "cumulative_variance_ratio": np.ndarray of cumulative variance ratios.
         cut_off (Optional[float]): Optional threshold for cumulative variance to indicate elbow point.
         figsize (Tuple[int, int]): Figure size for the plots.
+        artifact_name (Optional[str]): Dataset name used as the output directory.
 
     Returns:
-        plt.Figure: Matplotlib Figure object containing the PCA variance plots.
+        None: The PCA variance figure is saved and displayed in place.
     """
     explained_var = pca_info["explained_variance_ratio"]
     cum_var = pca_info["cumulative_variance_ratio"]
@@ -363,7 +396,7 @@ def plot_embeddings_2d(
     labels: Optional[Union[np.ndarray, list]] = None,
     title: str = "2D Embeddings Visualization",
     figsize: Tuple[int, int] = (8, 6),
-    artifact_name: str = "dataset",
+    artifact_name: Optional[str] = None,
 ) -> None:
     """
     Plots 2D scatter plot for dimensional reduction embeddings.
@@ -373,9 +406,10 @@ def plot_embeddings_2d(
         labels (Optional[Union[np.ndarray, list]]): Optional labels for coloring points.
         title (str): Title for the plot.
         figsize (Tuple[int, int]): Figure size for the scatter plot.
+        artifact_name (Optional[str]): Dataset name used as the output directory.
 
     Returns:
-        plt.Figure: Matplotlib Figure object containing the 2D embeddings scatter plot.
+        None: The 2D embeddings figure is saved and displayed in place.
     """
     emb = _to_numpy(embeddings)
     fig, ax = plt.subplots(figsize=figsize)
@@ -400,7 +434,7 @@ def plot_embeddings_3d(
     labels: Optional[Union[np.ndarray, list]] = None,
     title: str = "3D Embeddings Visualization",
     figsize: Tuple[int, int] = (9, 7),
-    artifact_name: str = "dataset",
+    artifact_name: Optional[str] = None,
 ) -> None:
     """
     Plots 3D scatter plot for dimensional reduction embeddings.
@@ -410,9 +444,10 @@ def plot_embeddings_3d(
         labels (Optional[Union[np.ndarray, list]]): Optional labels for coloring points.
         title (str): Title for the plot.
         figsize (Tuple[int, int]): Figure size for the scatter plot.
+        artifact_name (Optional[str]): Dataset name used as the output directory.
 
     Returns:
-        plt.Figure: Matplotlib Figure object containing the 3D embeddings scatter plot.
+        None: The 3D embeddings figure is saved and displayed in place.
     """
     emb = _to_numpy(embeddings)
     fig = plt.figure(figsize=figsize)
@@ -442,7 +477,7 @@ def plot_training_history(
     history: Dict[str, List[float]],
     metric_name: str = "accuracy",
     figsize: Tuple[int, int] = (12, 5),
-    artifact_name: str = "model",
+    artifact_name: Optional[str] = None,
 ) -> None:
     """
     Plots 1x2 training history curves (Loss and Metric) comparing train vs validation.
@@ -456,9 +491,10 @@ def plot_training_history(
         metric_name (str): Name of the metric to plot (e.g., "accuracy",
             "precision", "recall").
         figsize (Tuple[int, int]): Figure size for the plots.
+        artifact_name (Optional[str]): Dataset or model name used as the output directory.
 
     Returns:
-        plt.Figure: Matplotlib Figure object containing the training history plots.
+        None: The training history figure is saved and displayed in place.
     """
     epochs = range(1, len(history.get("train_loss", history.get("loss", []))) + 1)
     train_loss = history.get("train_loss", history.get("loss", []))
@@ -498,7 +534,7 @@ def plot_confusion_matrix(
     class_names: Optional[List[str]] = None,
     normalize: bool = False,
     figsize: Tuple[int, int] = (8, 6),
-    artifact_name: str = "model",
+    artifact_name: Optional[str] = None,
 ) -> None:
     """
     Plots normalized or raw confusion matrix heatmap for classification evaluation.
@@ -510,9 +546,10 @@ def plot_confusion_matrix(
             integer labels are used.
         normalize (bool): Whether to normalize the confusion matrix values to proportions.
         figsize (Tuple[int, int]): Figure size for the heatmap.
+        artifact_name (Optional[str]): Dataset or model name used as the output directory.
 
     Returns:
-        plt.Figure: Matplotlib Figure object containing the confusion matrix heatmap.
+        None: The confusion matrix figure is saved and displayed in place.
     """
     yt = _to_numpy(y_true)
     yp = _to_numpy(y_pred)
@@ -548,7 +585,7 @@ def plot_sample_predictions(
     class_names: Optional[List[str]] = None,
     max_samples: int = 15,
     figsize: Tuple[int, int] = (15, 9),
-    artifact_name: str = "model",
+    artifact_name: Optional[str] = None,
 ) -> None:
     """
     Plots a grid of sample images with titles colored green (correct) or red (incorrect).
@@ -561,9 +598,10 @@ def plot_sample_predictions(
             integer labels are used.
         max_samples (int): Maximum number of samples to display in the grid.
         figsize (Tuple[int, int]): Figure size for the grid of images.
+        artifact_name (Optional[str]): Dataset or model name used as the output directory.
 
     Returns:
-        plt.Figure: Matplotlib Figure object containing the sample predictions grid.
+        None: The sample predictions figure is saved and displayed in place.
     """
     imgs = _to_numpy(images)
     yt = _to_numpy(y_true)
@@ -606,7 +644,7 @@ def plot_roc_curves(
     y_probs: Union[np.ndarray, torch.Tensor],
     class_names: Optional[List[str]] = None,
     figsize: Tuple[int, int] = (8, 6),
-    artifact_name: str = "model",
+    artifact_name: Optional[str] = None,
 ) -> None:
     """
     Plots Receiver Operating Characteristic (ROC) curves and calculates AUC for binary or multi-class.
@@ -617,9 +655,10 @@ def plot_roc_curves(
         class_names (Optional[List[str]]): List of class names for labeling. If None,
             integer labels are used.
         figsize (Tuple[int, int]): Figure size for the ROC curves.
+        artifact_name (Optional[str]): Dataset or model name used as the output directory.
 
     Returns:
-        plt.Figure: Matplotlib Figure object containing the ROC curves.
+        None: The ROC curves figure is saved and displayed in place.
     """
     yt = _to_numpy(y_true)
     yp = _to_numpy(y_probs)
@@ -656,7 +695,7 @@ def plot_regression_residuals(
     y_true: Union[np.ndarray, list, torch.Tensor],
     y_pred: Union[np.ndarray, list, torch.Tensor],
     figsize: Tuple[int, int] = (14, 5),
-    artifact_name: str = "model",
+    artifact_name: Optional[str] = None,
 ) -> None:
     """
     Plots 1x2 figure showing Predicted vs Actual scatter and Residuals vs Predicted plot.
@@ -665,9 +704,10 @@ def plot_regression_residuals(
         y_true (Union[np.ndarray, list, torch.Tensor]): True target values.
         y_pred (Union[np.ndarray, list, torch.Tensor]): Predicted target values.
         figsize (Tuple[int, int]): Figure size for the plots.
+        artifact_name (Optional[str]): Dataset or model name used as the output directory.
 
     Returns:
-        plt.Figure: Matplotlib Figure object containing the regression residuals plots.
+        None: The regression residuals figure is saved and displayed in place.
     """
     yt = _to_numpy(y_true).flatten()
     yp = _to_numpy(y_pred).flatten()
@@ -713,7 +753,7 @@ def plot_saved_evaluation_artifacts(
         checkpoint_root (Union[str, Path]): Root directory where model checkpoints are stored.
 
     Returns:
-        None: Saves the generated plots to the 'figures/{model_name}' directory.
+        None: The generated evaluation figures are saved and displayed in place.
     """
     artifacts = load_evaluation_artifacts(model_name, checkpoint_root=checkpoint_root)
 
@@ -753,7 +793,7 @@ def plot_model_comparison(
     metrics: Optional[Union[List[float], Dict[str, float]]] = None,
     metric_key: str = "test_accuracy",
     figsize: Tuple[int, int] = (14, 5),
-    artifact_name: str = "model_comparison",
+    artifact_name: Optional[str] = None,
 ) -> None:
     """
     Plots 1x2 figure comparing Model Metric vs Parameters and GFLOPs with K/M/B scales.
@@ -766,9 +806,10 @@ def plot_model_comparison(
             list matching model_dirs order or a dict mapping model names/folder names to values.
         metric_key (str): Key to look for inside 'eval_results.json' if loading automatically from folder.
         figsize (Tuple[int, int]): Matplotlib figure dimensions.
+        artifact_name (Optional[str]): Name of the model group used as the output directory.
 
     Returns:
-        plt.Figure: Matplotlib Figure object comparing model efficiency vs performance.
+        None: The model comparison figure is saved and displayed in place.
     """
     models_data = []
 
@@ -853,7 +894,7 @@ def plot_feature_maps(
     max_maps: int = 16,
     cols: int = 4,
     figsize_per_row: Tuple[int, int] = (12, 3),
-    artifact_name: str = "model",
+    artifact_name: Optional[str] = None,
 ) -> None:
     """
     Plots intermediate CNN activation maps in a grid layout.
@@ -863,9 +904,10 @@ def plot_feature_maps(
         max_maps (int): Maximum number of feature maps to display.
         cols (int): Number of columns in the grid layout.
         figsize_per_row (Tuple[int, int]): Figure size per row of subplots.
+        artifact_name (Optional[str]): Model name used as the output directory.
 
     Returns:
-        plt.Figure: Matplotlib Figure object containing the feature maps grid.
+        None: The feature maps figure is saved and displayed in place.
     """
     fmaps = _to_numpy(feature_maps)
     if fmaps.ndim == 4:
@@ -895,7 +937,7 @@ def plot_grad_cam(
     alpha: float = 0.5,
     title: str = "Grad-CAM Heatmap Overlay",
     figsize: Tuple[int, int] = (10, 5),
-    artifact_name: str = "model",
+    artifact_name: Optional[str] = None,
 ) -> None:
     """
     Plots side-by-side comparison of original image and overlaid Grad-CAM heatmap.
@@ -906,9 +948,10 @@ def plot_grad_cam(
         alpha (float): Transparency level for heatmap overlay.
         title (str): Title for the heatmap overlay subplot.
         figsize (Tuple[int, int]): Figure size for the side-by-side plots.
+        artifact_name (Optional[str]): Model name used as the output directory.
 
     Returns:
-        plt.Figure: Matplotlib Figure object containing the original image and heatmap overlay.
+        None: The Grad-CAM figure is saved and displayed in place.
     """
     img = _to_numpy(image)
     if img.ndim == 4:
@@ -939,7 +982,7 @@ def plot_feature_importance(
     top_n: Optional[int] = None,
     title: str = "Feature Importance Attributions",
     figsize: Tuple[int, int] = (10, 6),
-    artifact_name: str = "model",
+    artifact_name: Optional[str] = None,
 ) -> None:
     """
     Plots horizontal bar chart ranking feature attributions/importance scores.
@@ -951,9 +994,10 @@ def plot_feature_importance(
             are displayed.
         title (str): Title for the feature importance plot.
         figsize (Tuple[int, int]): Figure size for the bar chart.
+        artifact_name (Optional[str]): Model name used as the output directory.
 
     Returns:
-        plt.Figure: Matplotlib Figure object containing the feature importance bar chart.
+        None: The feature importance figure is saved and displayed in place.
     """
     scores = _to_numpy(importance_scores).flatten()
     n_features = len(scores)
