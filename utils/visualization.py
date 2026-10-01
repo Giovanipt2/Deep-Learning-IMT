@@ -65,6 +65,7 @@ def _save_figure(fig: plt.Figure, artifact_name: str, filename: str) -> None:
     output_dir = Path("figures") / artifact_name
     output_dir.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_dir / filename, bbox_inches="tight")
+    plt.show()
     plt.close(fig)
 
 
@@ -487,8 +488,8 @@ def plot_training_history(
         ax2.legend()
         ax2.grid(True, linestyle="--", alpha=0.5)
 
-    fig.tight_layout()
     _save_figure(fig, artifact_name, "training_history.png")
+    fig.tight_layout()
 
 
 def plot_confusion_matrix(
@@ -701,7 +702,19 @@ def plot_saved_evaluation_artifacts(
     normalize_confusion_matrix: bool = False,
     checkpoint_root: Union[str, Path] = "checkpoints",
 ) -> None:
-    """Generate evaluation plots from the single persisted test pass."""
+    """
+    Generate evaluation plots from the single persisted test pass.
+
+    Args:
+        model_name (str): Name of the model to load evaluation artifacts for.
+        class_names (Optional[List[str]]): List of class names for labeling. If None,
+            integer labels are used.
+        normalize_confusion_matrix (bool): Whether to normalize the confusion matrix values to proportions.
+        checkpoint_root (Union[str, Path]): Root directory where model checkpoints are stored.
+
+    Returns:
+        None: Saves the generated plots to the 'figures/{model_name}' directory.
+    """
     artifacts = load_evaluation_artifacts(model_name, checkpoint_root=checkpoint_root)
 
     if artifacts["task_type"] == "classification":
