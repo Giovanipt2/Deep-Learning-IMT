@@ -83,6 +83,7 @@ class Trainer:
         self.task_type = task_type
         self.num_classes = num_classes
         self.primary_metric = primary_metric or ("accuracy" if task_type == "classification" else "rmse")
+        self.early_stopping = early_stopping
 
         # Determine metric direction (higher is better for accuracy/f1, lower for loss/rmse/mae)
         if primary_metric in ("loss", "rmse", "mse", "mae"):
@@ -90,7 +91,12 @@ class Trainer:
         else:
             self.higher_is_better = higher_is_better
 
-        self.best_metric_value = -float("inf") if self.higher_is_better else float("inf")
+        self._selection_higher_is_better = (
+            self.higher_is_better
+            if self.early_stopping is None or self.early_stopping.mode == "max"
+            else False
+        )
+        self.best_metric_value = -float("inf") if self._selection_higher_is_better else float("inf")
 
         self.device = device if device is not None else get_device()
         self.model = model.to(self.device)
@@ -162,7 +168,17 @@ class Trainer:
 
 
     def _restore_training_state(self, epochs: int, start_epoch: int) -> tuple[int, bool]:
-        """Restores the latest complete checkpoint and reports whether training is finished."""
+        """
+        Restores the latest complete checkpoint and reports whether training is finished.
+
+        Args:
+            epochs (int): Total number of epochs to train.
+            start_epoch (int): Epoch number to start training from (useful for resuming).
+
+        Returns:
+            tuple[int, bool]: A tuple containing the next epoch to start from and a boolean indicating
+                whether training is complete (True) or should continue (False).
+        """
         if self.checkpoint_manager is None or not self.checkpoint_manager.has_checkpoint(load_best=False):
             return start_epoch, False
 
@@ -198,13 +214,25 @@ class Trainer:
 
         early_stopped = bool(checkpoint.get("early_stopped", False))
         training_complete = early_stopped or last_epoch >= epochs
+        if training_complete:
+            self._load_best_model()
         return last_epoch + 1, training_complete
+
+
+    def _load_best_model(self) -> None:
+        """Loads the best model weights without changing optimizer state."""
+        if self.checkpoint_manager is not None and self.checkpoint_manager.has_checkpoint(load_best=True):
+            self.checkpoint_manager.load_checkpoint(
+                self.model,
+                device=self.device,
+                load_best=True,
+            )
 
 
     def _reset_training_state(self) -> None:
         """Resets in-memory state before a forced training run."""
         self.history = {}
-        self.best_metric_value = -float("inf") if self.higher_is_better else float("inf")
+        self.best_metric_value = -float("inf") if self._selection_higher_is_better else float("inf")
         self.train_tracker.reset()
         self.val_tracker.reset()
         if self.early_stopping is not None:
@@ -221,9 +249,24 @@ class Trainer:
         Returns:
             bool: True if current is better than best_metric_value, False otherwise.
         """
-        if self.higher_is_better:
+        if self._selection_higher_is_better:
             return current > self.best_metric_value
         return current < self.best_metric_value
+
+
+    def _get_selection_metric(self, val_metrics: dict[str, float]) -> float:
+        """
+        Returns the validation value used to select the best checkpoint.
+
+        Args:
+            val_metrics (dict[str, float]): Dictionary of validation metrics for the current epoch.
+
+        Returns:
+            float: The value of the primary metric used for checkpoint selection.
+        """
+        if self.early_stopping is not None and self.early_stopping.mode == "min":
+            return val_metrics["loss"]
+        return val_metrics.get(self.primary_metric, 0.0)
 
 
     def _prepare_batch(self, batch: Any) -> tuple[Any, torch.Tensor]:
@@ -415,6 +458,7 @@ class Trainer:
 
         logger.info(f"Starting model training on device '{self.device}' for {epochs - start_epoch + 1} epochs.")
 
+        training_completed = False
         try:
             for epoch in range(start_epoch, epochs + 1):
                 train_metrics = self._train_epoch(train_loader, epoch)
@@ -432,28 +476,23 @@ class Trainer:
                         self.scheduler.step()
 
                 metric_name = self.primary_metric
-                val_m_val = val_metrics.get(metric_name, 0.0)
+                selection_metric_value = self._get_selection_metric(val_metrics)
                 train_m_val = train_metrics.get(metric_name, 0.0)
 
                 # Check if current epoch is the best performing
-                is_best = self._is_better(val_m_val)
+                is_best = self._is_better(selection_metric_value)
                 if is_best:
-                    self.best_metric_value = val_m_val
+                    self.best_metric_value = selection_metric_value
 
                 logger.info(
                     f"Epoch [{epoch:03d}/{epochs:03d}] | "
                     f"Train Loss: {train_metrics['loss']:.4f} | Train {metric_name.title()}: {train_m_val:.4f} | "
-                    f"Val Loss: {val_metrics['loss']:.4f} | Val {metric_name.title()}: {val_m_val:.4f}"
+                    f"Val Loss: {val_metrics['loss']:.4f} | Val {metric_name.title()}: {val_metrics.get(metric_name, 0.0):.4f}"
                 )
 
                 early_stopped = False
                 if self.early_stopping is not None:
-                    if self.early_stopping.mode == "max":
-                        target_eval_metric = val_metrics.get(self.primary_metric, val_metrics["loss"])
-                    else:
-                        target_eval_metric = val_metrics["loss"] if "loss" in val_metrics else val_metrics.get(self.primary_metric)
-
-                    self.early_stopping(target_eval_metric)
+                    self.early_stopping(selection_metric_value)
                     if self.early_stopping.early_stop:
                         early_stopped = True
                         logger.info(f"Early stopping triggered at epoch {epoch}.")
@@ -473,7 +512,7 @@ class Trainer:
                         epoch=epoch,
                         model=self.model,
                         optimizer=self.optimizer,
-                        metric_value=val_m_val,
+                        metric_value=selection_metric_value,
                         is_best=is_best,
                         additional_state={
                             "scheduler_state_dict": sched_state,
@@ -489,8 +528,13 @@ class Trainer:
                 if early_stopped:
                     break
 
+            training_completed = True
+
         except KeyboardInterrupt:
             logger.warning("Training interrupted manually. Saving accumulated history.")
+
+        if training_completed:
+            self._load_best_model()
 
         # Persist complete training history to JSON on disk
         self._save_history_json()
