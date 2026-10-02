@@ -249,9 +249,10 @@ class Trainer:
         Returns:
             bool: True if current is better than best_metric_value, False otherwise.
         """
+        min_delta = self.early_stopping.min_delta if self.early_stopping is not None else 0.0
         if self._selection_higher_is_better:
-            return current > self.best_metric_value
-        return current < self.best_metric_value
+            return current > (self.best_metric_value + min_delta)
+        return current < (self.best_metric_value - min_delta)
 
 
     def _get_selection_metric(self, val_metrics: dict[str, float]) -> float:
