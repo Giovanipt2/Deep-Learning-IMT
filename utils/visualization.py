@@ -18,6 +18,7 @@ import pandas as pd
 import seaborn as sns
 import torch
 from sklearn.metrics import confusion_matrix, roc_curve, auc
+from torch.utils.data import DataLoader, Dataset
 
 
 # =====================================================================
@@ -158,15 +159,30 @@ def plot_correlation_heatmap(
     Returns:
         None: The heatmap figure is saved and displayed in place.
     """
+    if df.empty:
+        raise ValueError("Cannot plot correlations for an empty DataFrame.")
+    if method not in {"pearson", "spearman", "kendall"}:
+        raise ValueError("method must be 'pearson', 'spearman', or 'kendall'.")
+    if target_col is not None and target_col not in df.columns:
+        raise KeyError(f"Target column not found: {target_col}")
+    if top_k is not None and top_k <= 0:
+        raise ValueError("top_k must be greater than zero.")
+
     num_df = df.select_dtypes(include=[np.number])
+    if num_df.shape[1] == 0:
+        raise ValueError("No numeric columns available to plot correlations.")
     corr = num_df.corr(method=method)
 
-    if target_col and top_k and target_col in corr.columns:
+    if target_col and target_col not in corr.columns:
+        raise ValueError(f"Target column must be numeric for correlation analysis: {target_col}")
+
+    if target_col and top_k:
         target_corr = corr[target_col].drop(target_col).sort_values(ascending=False)
         k_pos = top_k // 2
         k_neg = top_k - k_pos
 
         top_features = list(target_corr.head(k_pos).index) + list(target_corr.tail(k_neg).index)
+        top_features = list(dict.fromkeys(top_features))
         selected_cols = top_features + [target_col]
         corr = corr.loc[selected_cols, selected_cols]
         title = f"{method.capitalize()} Correlation Heatmap (Top {top_k} Features for '{target_col}')"
@@ -200,6 +216,7 @@ def plot_distribution(
     columns: Optional[List[str]] = None,
     max_cols: int = 3,
     figsize_per_row: Tuple[int, int] = (15, 4),
+    target_col: Optional[str] = None,
 ) -> None:
     """
     Plots histograms with KDE curves for numerical features in a grid layout.
@@ -210,13 +227,33 @@ def plot_distribution(
             columns are plotted.
         max_cols (int): Maximum number of columns in the grid layout.
         figsize_per_row (Tuple[int, int]): Figure size per row of subplots.
+        target_col (Optional[str]): Optional target column to append to the plot. Discrete
+            targets are displayed as counts instead of KDE curves.
         dataset_name (str): Dataset name used as the output directory.
 
     Returns:
         None: The distribution figure is saved and displayed in place.
     """
+    if df.empty:
+        raise ValueError("Cannot plot distributions for an empty DataFrame.")
+    if max_cols <= 0:
+        raise ValueError("max_cols must be greater than zero.")
+    if target_col is not None and target_col not in df.columns:
+        raise KeyError(f"Target column not found: {target_col}")
+
     if columns is None:
         columns = list(df.select_dtypes(include=[np.number]).columns)
+    else:
+        columns = list(columns)
+
+    missing_columns = [col for col in columns if col not in df.columns]
+    if missing_columns:
+        raise KeyError(f"Columns not found: {missing_columns}")
+    non_numeric = [col for col in columns if not pd.api.types.is_numeric_dtype(df[col])]
+    if non_numeric and target_col not in non_numeric:
+        raise TypeError(f"Distribution columns must be numeric: {non_numeric}")
+    if target_col is not None and target_col not in columns:
+        columns.append(target_col)
 
     n_features = len(columns)
     if n_features == 0:
@@ -227,7 +264,19 @@ def plot_distribution(
     axes = np.atleast_1d(axes).flatten()
 
     for i, col in enumerate(columns):
-        sns.histplot(df[col], kde=True, ax=axes[i], color="steelblue")
+        is_target = col == target_col
+        values = df[col].dropna()
+        is_discrete = is_target and (
+            not pd.api.types.is_numeric_dtype(df[col]) or values.nunique() <= 20
+        )
+        use_kde = not is_discrete and values.nunique() > 1
+        sns.histplot(
+            df[col],
+            kde=use_kde,
+            discrete=is_discrete,
+            ax=axes[i],
+            color="darkorange" if is_target else "steelblue",
+        )
         axes[i].set_title(f"Distribution of {col}", fontsize=12)
         axes[i].set_xlabel("")
 
@@ -236,6 +285,175 @@ def plot_distribution(
 
     fig.tight_layout()
     _save_figure(fig, dataset_name, "distribution.png")
+
+
+def plot_target_distribution(
+    target: Union[pd.Series, np.ndarray, torch.Tensor, List[Any]],
+    dataset_name: str,
+    target_name: str = "Target",
+    max_categories: int = 20,
+    figsize: Tuple[int, int] = (9, 6),
+) -> None:
+    """Plots class balance for discrete targets or a histogram for continuous targets."""
+    if max_categories <= 0:
+        raise ValueError("max_categories must be greater than zero.")
+
+    values = _to_numpy(target).reshape(-1)
+    if values.size == 0:
+        raise ValueError("Cannot plot an empty target.")
+    values = values[~pd.isna(values)]
+    if values.size == 0:
+        raise ValueError("Target contains no non-null values.")
+
+    unique_values = pd.unique(values)
+    is_discrete = not np.issubdtype(values.dtype, np.number) or len(unique_values) <= max_categories
+    fig, ax = plt.subplots(figsize=figsize)
+
+    if is_discrete:
+        counts = pd.Series(values).value_counts().sort_index()
+        percentages = counts / counts.sum() * 100
+        bars = ax.bar(counts.index.astype(str), counts.values, color="teal")
+        ax.set_ylabel("Count")
+        ax.set_xlabel(target_name)
+        ax.set_title(f"{target_name} Distribution ({len(counts)} categories)")
+        for bar, percentage in zip(bars, percentages):
+            ax.annotate(
+                f"{percentage:.1f}%",
+                (bar.get_x() + bar.get_width() / 2, bar.get_height()),
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                xytext=(0, 3),
+                textcoords="offset points",
+            )
+        if len(counts) > 8:
+            ax.tick_params(axis="x", rotation=45)
+    else:
+        sns.histplot(values, kde=values.size > 1 and np.ptp(values) > 0, ax=ax, color="teal")
+        ax.set_xlabel(target_name)
+        ax.set_ylabel("Count")
+        ax.set_title(f"{target_name} Distribution")
+
+    fig.tight_layout()
+    _save_figure(fig, dataset_name, "target_distribution.png")
+
+
+def plot_tabular_samples(
+    df: pd.DataFrame,
+    dataset_name: str,
+    n_samples: int = 5,
+    columns: Optional[List[str]] = None,
+    random_state: Optional[int] = None,
+    figsize: Tuple[int, int] = (14, 4),
+) -> None:
+    """Displays randomly selected rows from a tabular dataset as a table."""
+    if df.empty:
+        raise ValueError("Cannot plot samples from an empty DataFrame.")
+    if n_samples <= 0:
+        raise ValueError("n_samples must be greater than zero.")
+    if columns is None:
+        selected_columns = list(df.columns)
+    else:
+        selected_columns = list(columns)
+        missing_columns = [col for col in selected_columns if col not in df.columns]
+        if missing_columns:
+            raise KeyError(f"Columns not found: {missing_columns}")
+    if not selected_columns:
+        raise ValueError("At least one column must be selected.")
+
+    samples = df.sample(n=min(n_samples, len(df)), random_state=random_state)
+    display_df = samples.loc[:, selected_columns].copy()
+    display_df.index = display_df.index.map(str)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.axis("off")
+    table = ax.table(
+        cellText=display_df.astype(str).values,
+        colLabels=display_df.columns,
+        rowLabels=display_df.index,
+        cellLoc="center",
+        loc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1, 1.6)
+    ax.set_title(f"Random Tabular Samples ({len(display_df)} rows)", pad=20)
+
+    fig.tight_layout()
+    _save_figure(fig, dataset_name, "tabular_samples.png")
+
+
+def plot_image_samples(
+    data: Union[Dataset, DataLoader, torch.Tensor, np.ndarray, List[Any]],
+    dataset_name: str,
+    n_samples: int = 5,
+    labels: Optional[Union[torch.Tensor, np.ndarray, List[Any]]] = None,
+    random_state: Optional[int] = None,
+    class_names: Optional[List[str]] = None,
+    cols: int = 5,
+    figsize_per_row: Tuple[int, int] = (15, 3),
+) -> None:
+    """Displays random image samples with labels, shapes, and channel information."""
+    if n_samples <= 0 or cols <= 0:
+        raise ValueError("n_samples and cols must be greater than zero.")
+
+    source = data.dataset if isinstance(data, DataLoader) else data
+    if isinstance(source, (Dataset, torch.Tensor, np.ndarray, list, tuple)) and not hasattr(source, "__len__"):
+        raise ValueError("Image data must provide a length.")
+    n_available = len(source)
+    if n_available == 0:
+        raise ValueError("Cannot plot samples from an empty image dataset.")
+
+    rng = np.random.default_rng(random_state)
+    indices = rng.choice(n_available, size=min(n_samples, n_available), replace=False)
+    label_values = None if labels is None else _to_numpy(labels).reshape(-1)
+    if label_values is not None and len(label_values) < n_available:
+        raise ValueError("labels must contain at least one value per image.")
+
+    rows = math.ceil(len(indices) / cols)
+    fig, axes = plt.subplots(rows, cols, figsize=(figsize_per_row[0], figsize_per_row[1] * rows))
+    axes = np.atleast_1d(axes).flatten()
+
+    for plot_index, sample_index in enumerate(indices):
+        raw_sample = source[int(sample_index)]
+        sample_label = label_values[int(sample_index)] if label_values is not None else None
+        if isinstance(raw_sample, (tuple, list)):
+            image = raw_sample[0]
+            if sample_label is None and len(raw_sample) > 1:
+                sample_label = _to_numpy(raw_sample[1]).reshape(-1)[0]
+        else:
+            image = raw_sample
+
+        image_array = _to_numpy(image)
+        original_shape = tuple(image_array.shape)
+        if image_array.ndim == 3 and image_array.shape[0] in (1, 3, 4):
+            image_array = np.moveaxis(image_array, 0, -1)
+        if image_array.ndim == 3 and image_array.shape[-1] == 1:
+            image_array = image_array[..., 0]
+        if image_array.ndim not in (2, 3):
+            raise ValueError(f"Expected a 2D image or a 3D image with channels, got {original_shape}.")
+
+        display_image = image_array.astype(float)
+        if display_image.min() < 0 or display_image.max() > 1:
+            image_min, image_max = display_image.min(), display_image.max()
+            if image_max > image_min:
+                display_image = (display_image - image_min) / (image_max - image_min)
+
+        ax = axes[plot_index]
+        ax.imshow(display_image, cmap="gray" if display_image.ndim == 2 else None)
+        channels = 1 if display_image.ndim == 2 else display_image.shape[-1]
+        label_text = ""
+        if sample_label is not None:
+            label_index = int(sample_label) if np.issubdtype(np.asarray(sample_label).dtype, np.integer) else None
+            label_text = class_names[label_index] if class_names and label_index is not None else str(sample_label)
+        ax.set_title(f"idx={sample_index} | shape={original_shape} | C={channels}" + (f"\nlabel={label_text}" if label_text else ""), fontsize=9)
+        ax.axis("off")
+
+    for empty_index in range(len(indices), len(axes)):
+        axes[empty_index].axis("off")
+
+    fig.tight_layout()
+    _save_figure(fig, dataset_name, "image_samples.png")
 
 
 def plot_missing_values(
@@ -254,6 +472,9 @@ def plot_missing_values(
     Returns:
         None: The missing values figure is saved and displayed in place.
     """
+    if df.empty:
+        raise ValueError("Cannot plot missing values for an empty DataFrame.")
+
     fig, ax = plt.subplots(figsize=figsize)
     sns.heatmap(df.isnull(), cbar=False, cmap="binary", yticklabels=False, ax=ax)
     ax.set_title("Missing Values Matrix (Black = Null)", fontsize=14, pad=15)
@@ -286,6 +507,22 @@ def plot_grouped_boxplots(
     Returns:
         None: The grouped boxplots figure is saved and displayed in place.
     """
+    if df.empty:
+        raise ValueError("Cannot plot grouped boxplots for an empty DataFrame.")
+    if target_col not in df.columns:
+        raise KeyError(f"Target column not found: {target_col}")
+    if not num_cols:
+        raise ValueError("At least one numeric column must be provided.")
+    if max_cols <= 0:
+        raise ValueError("max_cols must be greater than zero.")
+
+    missing_columns = [col for col in num_cols if col not in df.columns]
+    if missing_columns:
+        raise KeyError(f"Columns not found: {missing_columns}")
+    non_numeric = [col for col in num_cols if not pd.api.types.is_numeric_dtype(df[col])]
+    if non_numeric:
+        raise TypeError(f"Boxplot columns must be numeric: {non_numeric}")
+
     n_features = len(num_cols)
     rows = math.ceil(n_features / max_cols)
     fig, axes = plt.subplots(rows, max_cols, figsize=(figsize_per_row[0], figsize_per_row[1] * rows))
