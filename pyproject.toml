@@ -5,12 +5,14 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "datasets>=5.1.0",
     "future>=1.0.0",
     "ipykernel>=7.3.0",
     "matplotlib>=3.11.2",
     "numpy>=2.5.3",
     "pandas>=3.0.6",
     "pip>=26.2.1",
+    "requests>=2.34.2",
     "scikit-learn>=1.9.1",
     "seaborn>=0.13.2",
     "tensorboard>=2.21.0",
@@ -19,4 +21,5 @@ dependencies = [
     "torchsummary>=1.5.1",
     "torchvision>=0.29.0",
     "tqdm>=4.70.1",
+    "transformers>=5.19.0",
 ]
